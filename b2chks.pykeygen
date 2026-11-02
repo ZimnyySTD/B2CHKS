@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""CLI wrapper for b2chks.pykeygen pointing to b2chks keygen."""
+import sys
+import b2chks
+
+if __name__ == "__main__":
+    args = ["keygen"] + sys.argv[1:]
+    b2chks.main(args)

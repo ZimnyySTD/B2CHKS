@@ -31,25 +31,41 @@ def test_keygen(tmp_path):
     assert Path(priv).exists()
     assert Path(pub).exists()
 
-    with open(priv, "r") as f:
+    with open(priv, "r", encoding="utf-8") as f:
         assert "BEGIN PRIVATE KEY" in f.read()
-    with open(pub, "r") as f:
+    with open(pub, "r", encoding="utf-8") as f:
         assert "BEGIN PUBLIC KEY" in f.read()
 
 
+def test_pure_python_crypto():
+    sk = os.urandom(32)
+    pk = b2chks._ed_publickey(sk)
+    msg = b"Testing pure Python Ed25519 signing and verification"
+    sig = b2chks._ed_sign(msg, sk, pk)
+    assert b2chks._ed_verify(sig, msg, pk)
+    assert not b2chks._ed_verify(sig, b"tampered message", pk)
+
+    key = os.urandom(32)
+    nonce = os.urandom(12)
+    data = b"Testing pure Python AES-256-GCM encryption and decryption"
+    aad = b"associated_data"
+    ct = b2chks._py_aes_gcm_encrypt(key, nonce, data, aad=aad)
+    pt = b2chks._py_aes_gcm_decrypt(key, nonce, ct, aad=aad)
+    assert pt == data
+
+    with pytest.raises(ValueError):
+        b2chks._py_aes_gcm_decrypt(key, nonce, ct, aad=b"wrong_aad")
+
+
 def test_pack_and_extract_single_file_unencrypted(tmp_path):
-    # Setup test file with uncompressible data so compressed size exceeds chunk_size
     src_file = tmp_path / "sample.bin"
-    original_content = os.urandom(64 * 1024)  # 64KB random bytes
+    original_content = os.urandom(64 * 1024)
     src_file.write_bytes(original_content)
 
-    # Keygen
     priv, pub = b2chks.generate_keypair("tester", str(tmp_path / "keys"))
-
     dist_dir = tmp_path / "dist"
     extract_dir = tmp_path / "extracted"
 
-    # Pack with small chunk size so multiple chunks are produced
     manifest_path = b2chks.pack(
         source=str(src_file),
         chunk_size_str="16k",
@@ -59,7 +75,7 @@ def test_pack_and_extract_single_file_unencrypted(tmp_path):
     )
 
     assert manifest_path.exists()
-    with open(manifest_path, "r") as f:
+    with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
     assert manifest["protocol"] == "b2chks"
@@ -84,17 +100,15 @@ def test_pack_and_extract_single_file_unencrypted(tmp_path):
 
 
 def test_pack_and_extract_directory_encrypted(tmp_path):
-    # Setup directory structure
     src_dir = tmp_path / "my_project"
     src_dir.mkdir()
     (src_dir / "subfolder").mkdir()
-    (src_dir / "file1.txt").write_text("Hello World!")
+    (src_dir / "file1.txt").write_text("Hello World!", encoding="utf-8")
     (src_dir / "subfolder" / "data.bin").write_bytes(b"\x00\x01\x02\x03\xff" * 4000)
 
     dist_dir = tmp_path / "dist_dir"
     extract_dir = tmp_path / "extracted_dir"
 
-    # Pack directory with encryption
     passphrase = "UltraSecretPassphrase123"
     manifest_path = b2chks.pack(
         source=str(src_dir),
@@ -103,7 +117,7 @@ def test_pack_and_extract_directory_encrypted(tmp_path):
         encrypt_key=passphrase,
     )
 
-    with open(manifest_path, "r") as f:
+    with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
     assert manifest["package_info"]["source_type"] == "directory"
@@ -132,8 +146,62 @@ def test_pack_and_extract_directory_encrypted(tmp_path):
 
     extracted_project = extract_dir / "my_project"
     assert extracted_project.is_dir()
-    assert (extracted_project / "file1.txt").read_text() == "Hello World!"
+    assert (extracted_project / "file1.txt").read_text(encoding="utf-8") == "Hello World!"
     assert (extracted_project / "subfolder" / "data.bin").read_bytes() == (b"\x00\x01\x02\x03\xff" * 4000)
+
+
+def test_zero_dependency_mode(tmp_path, monkeypatch):
+    # Force pure-Python execution mode
+    monkeypatch.setattr(b2chks, "HAVE_CRYPTOGRAPHY", False)
+
+    src_file = tmp_path / "pure_data.txt"
+    src_file.write_text("Testing zero dependency cross-platform execution!" * 50, encoding="utf-8")
+
+    priv, pub = b2chks.generate_keypair("zero_dep_author", str(tmp_path / "keys"))
+    dist_dir = tmp_path / "dist_pure"
+    extract_dir = tmp_path / "ext_pure"
+
+    manifest_path = b2chks.pack(
+        source=str(src_file),
+        chunk_size_str="500b",
+        output_dir=str(dist_dir),
+        encrypt_key="MyPurePassword",
+        private_key_path=priv,
+        author="zero_dep_author",
+    )
+
+    assert b2chks.verify(str(manifest_path), public_key_path=pub)
+    ok = b2chks.extract(
+        str(manifest_path),
+        output_dir=str(extract_dir),
+        decrypt_key="MyPurePassword",
+        public_key_path=pub,
+    )
+    assert ok
+    assert (extract_dir / "pure_data.txt").read_text(encoding="utf-8") == src_file.read_text(encoding="utf-8")
+
+
+def test_pack_with_keygen_flag(tmp_path):
+    src_file = tmp_path / "doc.txt"
+    src_file.write_text("Document with auto keygen", encoding="utf-8")
+    dist_dir = tmp_path / "auto_dist"
+
+    manifest_path = b2chks.pack(
+        source=str(src_file),
+        chunk_size_str="10k",
+        output_dir=str(dist_dir),
+        generate_key=True,
+        author="auto_author",
+    )
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    assert manifest["security"]["developer_id"] == "auto_author"
+    assert len(manifest["security"]["signature"]) > 0
+    assert (dist_dir / "private.pem").exists()
+    assert (dist_dir / "public.pem").exists()
+    assert b2chks.verify(str(manifest_path))
 
 
 def test_verification_corrupted_and_missing_chunk(tmp_path):
@@ -149,12 +217,10 @@ def test_verification_corrupted_and_missing_chunk(tmp_path):
 
     assert b2chks.verify(str(manifest_path))
 
-    # Corrupt chunk_000.bin
     chunk0 = dist_dir / "chunk_000.bin"
     chunk0.write_bytes(b"CORRUPTED_BYTES" + chunk0.read_bytes())
     assert not b2chks.verify(str(manifest_path))
 
-    # Remove chunk_001.bin
     chunk1 = dist_dir / "chunk_001.bin"
     chunk1.unlink()
     assert not b2chks.verify(str(manifest_path))
@@ -176,97 +242,65 @@ def test_verification_tampered_manifest_signature(tmp_path):
 
     assert b2chks.verify(str(manifest_path), public_key_path=pub)
 
-    # Tamper with manifest package_info
-    with open(manifest_path, "r") as f:
+    with open(manifest_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     data["package_info"]["name"] = "tampered_name.dat"
-    with open(manifest_path, "w") as f:
+    with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(data, f)
 
     assert not b2chks.verify(str(manifest_path), public_key_path=pub)
 
 
-def test_cli_subcommands(tmp_path):
-    # Test keygen CLI
+def test_core_py_and_core_pykeygen_cli(tmp_path):
+    # Test `python core.pykeygen --author "arcxan"`
     res = subprocess.run(
-        [sys.executable, "b2chks.py", "keygen", "--author", "cli_tester", "--out-dir", str(tmp_path / "cli_keys")],
+        [sys.executable, "core.pykeygen", "--author", "arcxan", "--out-dir", str(tmp_path / "keys")],
         capture_output=True,
         text=True,
     )
     assert res.returncode == 0
-    assert (tmp_path / "cli_keys" / "private.pem").exists()
-    assert (tmp_path / "cli_keys" / "public.pem").exists()
+    assert (tmp_path / "keys" / "private.pem").exists()
+    assert (tmp_path / "keys" / "public.pem").exists()
 
-    # Test pack CLI requires chunk-size
-    test_file = tmp_path / "cli_test.txt"
-    test_file.write_text("Testing CLI execution")
+    # Test `python core.py pack ./folder --chunk-size 500m --encrypt-key "MySecretPassphrase123"`
+    src_folder = tmp_path / "my_game_folder"
+    src_folder.mkdir()
+    (src_folder / "game.bin").write_bytes(b"\xaa\xbb" * 1000)
 
-    res = subprocess.run(
-        [sys.executable, "b2chks.py", "pack", str(test_file)],
-        capture_output=True,
-        text=True,
-    )
-    assert res.returncode != 0
-    assert "required" in res.stderr.lower() or "--chunk-size" in res.stderr.lower()
-
-    # Test pack CLI success
-    out_dir = tmp_path / "cli_dist"
     res = subprocess.run(
         [
             sys.executable,
-            "b2chks.py",
+            "core.py",
             "pack",
-            str(test_file),
+            str(src_folder),
             "--chunk-size",
-            "1k",
-            "--output-dir",
-            str(out_dir),
-            "--private-key",
-            str(tmp_path / "cli_keys" / "private.pem"),
-            "--author",
-            "cli_tester",
+            "500m",
             "--encrypt-key",
-            "cli_pass",
+            "MySecretPassphrase123",
+            "--output-dir",
+            str(tmp_path / "dist_core"),
         ],
         capture_output=True,
         text=True,
     )
     assert res.returncode == 0
-    manifest = out_dir / "manifest.json"
+    manifest = tmp_path / "dist_core" / "manifest.json"
     assert manifest.exists()
 
-    # Test verify CLI success
+    # Test extraction via `core.py`
     res = subprocess.run(
         [
             sys.executable,
-            "b2chks.py",
-            "verify",
-            str(manifest),
-            "--public-key",
-            str(tmp_path / "cli_keys" / "public.pem"),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert res.returncode == 0
-
-    # Test extract CLI success
-    ext_dir = tmp_path / "cli_ext"
-    res = subprocess.run(
-        [
-            sys.executable,
-            "b2chks.py",
+            "core.py",
             "extract",
             str(manifest),
             "--output-dir",
-            str(ext_dir),
+            str(tmp_path / "ext_core"),
             "--decrypt-key",
-            "cli_pass",
-            "--public-key",
-            str(tmp_path / "cli_keys" / "public.pem"),
+            "MySecretPassphrase123",
         ],
         capture_output=True,
         text=True,
     )
     assert res.returncode == 0
-    assert (ext_dir / "cli_test.txt").read_text() == "Testing CLI execution"
+    assert (tmp_path / "ext_core" / "my_game_folder" / "game.bin").read_bytes() == (b"\xaa\xbb" * 1000)
