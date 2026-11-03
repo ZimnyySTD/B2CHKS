@@ -21,7 +21,11 @@ from b2chks.manifest import load_manifest, write_manifest, get_canonical_json_by
 from b2chks.backends import get_backend_info, HAVE_CRYPTOGRAPHY, HAVE_ZSTANDARD
 from b2chks.signing import _ed_publickey, _ed_sign, _ed_verify
 from b2chks.encryption import _py_aes_gcm_encrypt, _py_aes_gcm_decrypt
-from cli.main import main
+
+def main(*args, **kwargs):
+    """Lazy CLI entrypoint to avoid circular import issues."""
+    from cli.main import main as _cli_main
+    return _cli_main(*args, **kwargs)
 
 PROTOCOL_VERSION = "b2chks"
 
