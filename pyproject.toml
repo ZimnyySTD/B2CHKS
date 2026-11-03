@@ -12,11 +12,15 @@ license = {text = "MIT"}
 authors = [
     {name = "arcxan"}
 ]
-dependencies = []
+dependencies = [
+    "cryptography>=3.4",
+]
 
 [project.optional-dependencies]
 fast = [
-    "cryptography>=3.4",
+    "zstandard>=0.18",
+]
+zstd = [
     "zstandard>=0.18",
 ]
 

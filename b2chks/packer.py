@@ -16,11 +16,11 @@ from b2chks.encryption import (
     SCRYPT_P,
     PBKDF2_ITERATIONS,
     derive_aes_key,
-    encrypt_aes_gcm,
+    get_aes_gcm_cipher,
 )
 from b2chks.exceptions import CancelledError
 from b2chks.manifest import get_canonical_json_bytes, write_manifest
-from b2chks.signing import generate_keypair, load_private_key_seed, _ed_publickey, sign_data
+from b2chks.signing import generate_keypair, sign_data
 
 PROTOCOL_VERSION = "b2chks"
 
@@ -28,17 +28,16 @@ def _process_chunk_worker(
     chunk_index: int,
     chunk_data: bytes,
     is_encrypted: bool,
-    aes_key: Optional[bytes],
+    cipher: Optional[Any],
     out_dir: Path,
 ) -> Dict[str, Any]:
-    """Process, encrypt, hash, and write a single chunk to disk."""
-    if is_encrypted and aes_key:
+    """Process, encrypt, hash, and write a single chunk to disk reusing cipher instance."""
+    if is_encrypted and cipher:
         nonce = os.urandom(NONCE_SIZE)
-        ciphertext_with_tag = encrypt_aes_gcm(
-            aes_key,
+        ciphertext_with_tag = cipher.encrypt(
             nonce,
             chunk_data,
-            aad=chunk_index.to_bytes(4, "big"),
+            associated_data=chunk_index.to_bytes(4, "big"),
         )
         file_bytes = nonce + ciphertext_with_tag
     else:
@@ -111,7 +110,7 @@ def pack(
 
     is_encrypted = bool(encrypt_key)
     salt_hex = None
-    aes_key = None
+    cipher = None
     kdf_params = {}
     chosen_kdf = kdf
 
@@ -126,6 +125,8 @@ def pack(
             kdf_params = {"iterations": PBKDF2_ITERATIONS}
             aes_key = derive_aes_key(encrypt_key, salt, "PBKDF2-HMAC-SHA256", kdf_params)
 
+        cipher = get_aes_gcm_cipher(aes_key)
+
         if chunk_size > (NONCE_SIZE + TAG_SIZE):
             read_chunk_size = chunk_size - (NONCE_SIZE + TAG_SIZE)
         else:
@@ -133,7 +134,7 @@ def pack(
     else:
         read_chunk_size = chunk_size
 
-    # 2. Bounded parallel chunk worker pool to keep memory usage constant regardless of file size
+    # 2. Bounded parallel chunk worker pool
     max_workers = workers if workers and workers > 0 else min(32, (os.cpu_count() or 4) * 2)
     max_in_flight = max_workers * 2
     chunks_meta = []
@@ -160,13 +161,12 @@ def pack(
                     chunk_index,
                     chunk_data,
                     is_encrypted,
-                    aes_key,
+                    cipher,
                     out_dir,
                 )
                 in_flight[fut] = chunk_index
                 chunk_index += 1
 
-                # If we reached max in-flight tasks, wait for at least one to complete
                 while len(in_flight) >= max_in_flight:
                     done, _ = concurrent.futures.wait(in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
                     for d in done:
@@ -179,7 +179,6 @@ def pack(
                 if not chunk_data:
                     break
 
-            # Drain remaining tasks
             while in_flight:
                 done, _ = concurrent.futures.wait(in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
                 for d in done:
@@ -225,16 +224,15 @@ def pack(
 
     # 3. Cryptographic author signature
     if priv_file and Path(priv_file).exists():
-        seed = load_private_key_seed(Path(priv_file))
-        if seed:
-            pub_bytes = _ed_publickey(seed)
-            manifest["security"]["public_key"] = pub_bytes.hex()
+        signed = sign_data(b"", Path(priv_file))
+        if signed:
+            manifest["security"]["public_key"] = signed[1]
             if not manifest["security"]["developer_id"]:
                 manifest["security"]["developer_id"] = author or "author"
             canonical_bytes = get_canonical_json_bytes(manifest)
-            signed = sign_data(canonical_bytes, Path(priv_file))
-            if signed:
-                manifest["security"]["signature"] = signed[0]
+            actual_signed = sign_data(canonical_bytes, Path(priv_file))
+            if actual_signed:
+                manifest["security"]["signature"] = actual_signed[0]
 
     manifest_file = out_dir / "manifest.json"
     write_manifest(manifest, manifest_file)

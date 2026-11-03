@@ -13,6 +13,7 @@ Install B2CHKS globally so that `b2chks` and `core` commands are available anywh
 python install.py
 ```
 - If B2CHKS is already installed, running `install.py` automatically replaces and refreshes the installation cleanly.
+- Installs and verifies native performance backends (`cryptography`).
 - Configures native PowerShell launchers (`.ps1`, `.cmd`, `.bat`) and profile functions to prevent any "cmdlet not found" errors on Windows.
 
 ### Uninstallation (Only if Installed)
@@ -29,13 +30,15 @@ b2chks uninstall
 
 ---
 
-## 2. Maximum Performance Architecture
+## 2. Native-Only Performance Architecture
 
-B2CHKS is engineered for maximum throughput across all hardware:
-- **Fast Stream Compression**: Utilizes optimized buffered streaming (4MB buffers) and fast DEFLATE level 1 compression, cutting compression and extraction times by up to 5x.
-- **Parallel Chunk Pipeline**: Multi-threaded worker pool (`ThreadPoolExecutor`) processes chunks concurrently across all CPU cores for encryption, hashing, decryption, and verification.
-- **Parallel Integrity Verification**: Performs multi-threaded SHA-256 hashing during `verify`, validating hundreds of chunks in parallel across NVMe/SSD channels.
-- **Hardware Acceleration**: Automatically utilizes native C-extensions and AES-NI hardware instructions when `cryptography` is present, while seamlessly falling back to pure-Python when in zero-dependency environments.
+B2CHKS enforces native, optimized libraries for all performance-critical tasks:
+- **Native AES-256-GCM**: Hardware AES-NI acceleration via `cryptography`.
+- **Native Ed25519 Signatures**: High-speed native digital signatures via `cryptography`.
+- **Native Scrypt KDF**: Memory-hard key derivation via standard library `hashlib.scrypt`.
+- **Fast Stream Compression**: Optimized buffered streaming (4MB buffers) using native `zlib` (level 1 DEFLATE) or optional native `zstandard` (`zstd`).
+- **Bounded Worker Queue**: Multi-threaded worker pool (`ThreadPoolExecutor`) with bounded in-flight tasks (`max_in_flight`) preventing RAM exhaustion on large files.
+- **Parallel Integrity Verification**: Multi-threaded SHA-256 hashing during `verify`, validating hundreds of chunks in parallel across NVMe/SSD channels.
 
 ---
 
@@ -72,7 +75,7 @@ If `--out-dir` is omitted, keys are written to the current working directory (`.
 
 ### Step B: Packaging Files or Directories (`pack`)
 
-B2CHKS automatically applies high-speed stream compression (`gzip` for single files, `tar.gz` for directories) and processes chunks across CPU cores using a multi-threaded pipeline before splitting data into user-specified chunk sizes.
+B2CHKS automatically applies high-speed stream compression (`gzip` or `zstd`) and processes chunks across CPU cores using a multi-threaded pipeline before splitting data into user-specified chunk sizes.
 
 > **Note:** The `--chunk-size` (or `-c`) flag is required. You can specify sizes using human-readable units like `500k`, `100m`, `1g`, `2gb`.
 
@@ -87,6 +90,11 @@ python core.py pack ./my_game_folder --chunk-size 500m --author "arcxan"
 python core.py pack ./my_game_folder --chunk-size 500m --encrypt-key "MySecretPassphrase123"
 ```
 *By default, passwords use the memory-hard `scrypt` Key Derivation Function (N=16384, r=8, p=1). Memory hardness prevents GPU, FPGA, and ASIC cluster attacks from brute-forcing passphrases.*
+
+#### 3. High-speed Zstandard compression:
+```bash
+b2chks pack ./my_game_folder --chunk-size 500m --compression zstd
+```
 
 #### Output Structure:
 The command produces:
@@ -136,7 +144,6 @@ python core.py extract manifest.json --decrypt-key "MySecretPassphrase123"
 B2CHKS is designed as an open, embeddable SDK that can be directly imported into GUI apps (PySide, PyQt, Tkinter, Electron), background services, or custom scripts:
 
 ```python
-import b2chks
 from b2chks import B2CHKS
 
 # 1. Generate keys
@@ -155,6 +162,7 @@ manifest_path = B2CHKS.pack(
     encrypt_key="AppSecretKey",
     private_key=priv_file,
     author="developer",
+    compression="gzip", # or "zstd"
     progress_callback=on_progress,
 )
 
@@ -180,7 +188,7 @@ success = B2CHKS.extract(
 
 - **Protocol identifier:** `"b2chks"`
 - **Anti-Brute-Force Memory-Hard KDF:**
-  - Employs `scrypt` (N=16384, r=8, p=1) deriving 256-bit AES keys.
+  - Employs native `scrypt` (N=16384, r=8, p=1) deriving 256-bit AES keys.
   - Requires large memory allocation per attempt, rendering GPU and ASIC dictionary/brute-force attacks computationally infeasible.
   - Full backwards compatibility with `PBKDF2-HMAC-SHA256`.
 - **Chunk Encryption (Hybrid Model):**
@@ -191,7 +199,7 @@ success = B2CHKS.extract(
   - Ed25519 signature over deterministic canonical JSON of `manifest.json` (excluding `security.signature`).
 - **Cross-Platform Compatibility:**
   - Standardized on UTF-8 and POSIX/Windows path handling with Pathlib.
-  - Built-in pure-Python RFC 8032 Ed25519 and NIST SP 800-38D AES-GCM engine for zero-dependency execution.
-  - Automatically utilizes `cryptography` C-extensions if installed for maximum hardware acceleration.
+  - Strict path traversal protection in archive extraction (`_safe_extract_tar`).
+  - Native C-extensions and AES-NI hardware instructions via `cryptography`.
 - **High-Throughput Parallel Pipeline:**
-  - Multi-threaded chunk encryption, hashing, verification, and decryption via `concurrent.futures`.
+  - Multi-threaded chunk encryption, hashing, verification, and decryption via bounded `ThreadPoolExecutor`.

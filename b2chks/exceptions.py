@@ -31,3 +31,7 @@ class CompressionError(B2CHKSError):
 class CancelledError(B2CHKSError):
     """Raised when an operation is cancelled via cancellation token."""
     pass
+
+class MissingDependencyError(B2CHKSError):
+    """Raised when a required native backend dependency is missing."""
+    pass

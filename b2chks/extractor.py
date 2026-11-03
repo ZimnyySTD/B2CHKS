@@ -12,7 +12,7 @@ from b2chks.encryption import (
     NONCE_SIZE,
     TAG_SIZE,
     derive_aes_key,
-    decrypt_aes_gcm,
+    get_aes_gcm_cipher,
 )
 from b2chks.exceptions import (
     IntegrityError,
@@ -145,20 +145,22 @@ def _decrypt_chunk_worker(
     idx: int,
     raw_chunk: bytes,
     is_encrypted: bool,
-    aes_key: Optional[bytes],
+    cipher: Optional[Any],
 ) -> Tuple[int, bytes]:
-    """Decrypt single chunk using AES-256-GCM."""
-    if is_encrypted and aes_key:
+    """Decrypt single chunk using native AES-256-GCM cipher instance."""
+    if is_encrypted and cipher:
         if len(raw_chunk) < (NONCE_SIZE + TAG_SIZE):
             raise DecryptionError(f"Corrupt encrypted chunk {idx}: file too small")
         nonce = raw_chunk[:NONCE_SIZE]
         ciphertext_with_tag = raw_chunk[NONCE_SIZE:]
-        decrypted_data = decrypt_aes_gcm(
-            aes_key,
-            nonce,
-            ciphertext_with_tag,
-            aad=idx.to_bytes(4, "big"),
-        )
+        try:
+            decrypted_data = cipher.decrypt(
+                nonce,
+                ciphertext_with_tag,
+                associated_data=idx.to_bytes(4, "big"),
+            )
+        except Exception as e:
+            raise DecryptionError("Cryptographic authentication tag mismatch") from e
         return idx, decrypted_data
     return idx, raw_chunk
 
@@ -193,7 +195,7 @@ def extract(
     target_name = package_info.get("name", "extracted_output")
     compression_algo = package_info.get("compression", "gzip")
 
-    aes_key = None
+    cipher = None
     if is_encrypted:
         enc_info = manifest.get("encryption", {})
         salt_hex = enc_info.get("salt")
@@ -221,6 +223,7 @@ def extract(
 
         kdf_name = enc_info.get("kdf", "scrypt")
         aes_key = derive_aes_key(passphrase, salt, kdf_name, enc_info)
+        cipher = get_aes_gcm_cipher(aes_key)
 
     chunks = sorted(manifest.get("chunks", []), key=lambda x: x["index"])
 
@@ -271,12 +274,11 @@ def extract(
                     if cancel_token and cancel_token():
                         raise CancelledError("Extraction cancelled by user")
 
-                    # Fill worker pool up to max_in_flight
                     while len(in_flight) < max_in_flight:
                         try:
                             idx, cpath = next(submit_iter)
                             raw_chunk = cpath.read_bytes()
-                            fut = executor.submit(_decrypt_chunk_worker, idx, raw_chunk, is_encrypted, aes_key)
+                            fut = executor.submit(_decrypt_chunk_worker, idx, raw_chunk, is_encrypted, cipher)
                             in_flight[fut] = idx
                         except StopIteration:
                             break
@@ -294,7 +296,6 @@ def extract(
                             print("[-] Cryptographic authentication layer rejected decryption key or corrupted data.")
                             return False
 
-                    # Flush contiguous chunks in order to disk
                     while next_write_idx in decrypted_buffer:
                         out_f.write(decrypted_buffer.pop(next_write_idx))
                         next_write_idx += 1

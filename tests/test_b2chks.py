@@ -1,3 +1,4 @@
+"""Integration tests for B2CHKS CLI and top-level workflows."""
 import json
 import os
 import shutil
@@ -37,26 +38,6 @@ def test_keygen(tmp_path):
         assert "BEGIN PRIVATE KEY" in f.read()
     with open(pub, "r", encoding="utf-8") as f:
         assert "BEGIN PUBLIC KEY" in f.read()
-
-
-def test_pure_python_crypto():
-    sk = os.urandom(32)
-    pk = b2chks._ed_publickey(sk)
-    msg = b"Testing pure Python Ed25519 signing and verification"
-    sig = b2chks._ed_sign(msg, sk, pk)
-    assert b2chks._ed_verify(sig, msg, pk)
-    assert not b2chks._ed_verify(sig, b"tampered message", pk)
-
-    key = os.urandom(32)
-    nonce = os.urandom(12)
-    data = b"Testing pure Python AES-256-GCM encryption and decryption"
-    aad = b"associated_data"
-    ct = b2chks._py_aes_gcm_encrypt(key, nonce, data, aad=aad)
-    pt = b2chks._py_aes_gcm_decrypt(key, nonce, ct, aad=aad)
-    assert pt == data
-
-    with pytest.raises((ValueError, b2chks.DecryptionError)):
-        b2chks._py_aes_gcm_decrypt(key, nonce, ct, aad=b"wrong_aad")
 
 
 def test_anti_brute_force_scrypt_kdf():
@@ -194,36 +175,6 @@ def test_pack_and_extract_directory_encrypted(tmp_path):
     assert (extracted_project / "subfolder" / "data.bin").read_bytes() == (b"\x00\x01\x02\x03\xff" * 4000)
 
 
-def test_zero_dependency_mode(tmp_path, monkeypatch):
-    monkeypatch.setattr(b2chks, "HAVE_CRYPTOGRAPHY", False)
-
-    src_file = tmp_path / "pure_data.txt"
-    src_file.write_text("Testing zero dependency cross-platform execution!" * 50, encoding="utf-8")
-
-    priv, pub = b2chks.generate_keypair("zero_dep_author", str(tmp_path / "keys"))
-    dist_dir = tmp_path / "dist_pure"
-    extract_dir = tmp_path / "ext_pure"
-
-    manifest_path = b2chks.pack(
-        source=str(src_file),
-        chunk_size_str="500b",
-        output_dir=str(dist_dir),
-        encrypt_key="MyPurePassword",
-        private_key_path=priv,
-        author="zero_dep_author",
-    )
-
-    assert b2chks.verify(str(manifest_path), public_key_path=pub)
-    ok = b2chks.extract(
-        str(manifest_path),
-        output_dir=str(extract_dir),
-        decrypt_key="MyPurePassword",
-        public_key_path=pub,
-    )
-    assert ok
-    assert (extract_dir / "pure_data.txt").read_text(encoding="utf-8") == src_file.read_text(encoding="utf-8")
-
-
 def test_pack_with_keygen_flag(tmp_path):
     src_file = tmp_path / "doc.txt"
     src_file.write_text("Document with auto keygen", encoding="utf-8")
@@ -347,23 +298,18 @@ def test_core_py_and_core_pykeygen_cli(tmp_path):
 
 
 def test_installer_reinstall_and_uninstall():
-    # Install
     install.install()
     assert install.is_installed()
 
-    # Reinstall replaces cleanly
     install.install()
     assert install.is_installed()
 
-    # Uninstall
     ok = install.uninstall()
     assert ok
     assert not install.is_installed()
 
-    # Uninstalling again reports not installed
     ok2 = install.uninstall()
     assert not ok2
 
-    # Reinstall back for system use
     install.install()
     assert install.is_installed()

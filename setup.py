@@ -7,8 +7,12 @@ setup(
     packages=find_packages(),
     py_modules=["b2chks", "core", "b3chks"],
     python_requires=">=3.8",
+    install_requires=[
+        "cryptography>=3.4",
+    ],
     extras_require={
-        "fast": ["cryptography", "zstandard"],
+        "fast": ["zstandard>=0.18"],
+        "zstd": ["zstandard>=0.18"],
     },
     entry_points={
         "console_scripts": [
