@@ -49,53 +49,57 @@ The manifest is a UTF-8 encoded JSON document describing the package topology, s
 }
 ```
 
-### Field Definitions
+### Field Definitions & Types
 
 #### `protocol` (string, required)
-Must be `"b2chks"`, `"b2chks-v1"`, or backward-compatible `"chunk-core-v1"`.
+Identifier indicating protocol specification. Accepted values for backward compatibility:
+- `"b2chks"` (default v1)
+- `"b2chks-v1"`
+- `"chunk-core-v1"` (legacy specification identifier)
 
 #### `package_info` (object, required)
 - `name` (string): Original source file or folder name.
-- `source_type` (string): `"file"` or `"directory"`.
-- `total_size_bytes` (integer): Total uncompressed size in bytes.
+- `source_type` (string): Type of source (`"file"` or `"directory"`).
+- `total_size_bytes` (integer): Total uncompressed payload size in bytes.
 - `chunk_size_bytes` (integer): Maximum user-defined target chunk payload size.
-- `total_chunks` (integer): Count of chunks defined in the package.
-- `encrypted` (boolean): `true` if chunk payloads are encrypted with AES-256-GCM.
-- `compression` (string, optional): `"gzip"` (default) or `"zstd"`.
+- `total_chunks` (integer): Total count of chunk files making up the archive.
+- `encrypted` (boolean): `true` if chunk payloads are encrypted with AES-256-GCM, `false` otherwise.
+- `compression` (string, optional): Stream compression algorithm used (`"gzip"` or `"zstd"`). Default is `"gzip"`.
 
 #### `encryption` (object, required if `encrypted == true`)
-- `algorithm` (string): `"AES-256-GCM"`.
-- `kdf` (string): `"scrypt"` (anti-brute-force) or `"PBKDF2-HMAC-SHA256"`.
-- `salt` (string, hex): 16-byte random cryptographic salt.
-- `n`, `r`, `p` (integers, optional): `scrypt` CPU and memory cost parameters.
-- `iterations` (integer, optional): Iteration count if PBKDF2 is used.
+- `algorithm` (string): Cryptographic cipher (`"AES-256-GCM"`).
+- `kdf` (string): Key Derivation Function (`"scrypt"` or `"PBKDF2-HMAC-SHA256"`).
+- `salt` (string, hex): 16-byte cryptographically secure pseudorandom salt.
+- `n`, `r`, `p` (integers, optional): `scrypt` CPU and memory cost parameters (default: N=16384, r=8, p=1).
+- `iterations` (integer, optional): Iteration count if PBKDF2 is selected (default: 100,000).
 
 #### `security` (object, required)
-- `developer_id` (string): Author identifier.
-- `public_key` (string, hex): 32-byte Ed25519 public key in raw hex or SubjectPublicKeyInfo.
-- `signature` (string, hex): 64-byte Ed25519 signature over canonical JSON.
+- `developer_id` (string): Identifier of developer/author.
+- `public_key` (string, hex): 32-byte Ed25519 public key in raw hex or SubjectPublicKeyInfo ASN.1 format.
+- `signature` (string, hex): 64-byte Ed25519 cryptographic signature proving manifest authorship.
 
 #### `chunks` (array of objects, required)
-- `index` (integer): Zero-based sequential chunk index.
-- `filename` (string): Standard chunk filename format `chunk_{index:03d}.bin`.
-- `size` (integer): File size of the chunk in bytes.
+- `index` (integer): Zero-based sequential chunk index (`0, 1, 2, ...`).
+- `filename` (string): Default formatted filename: `chunk_{index:03d}.bin`.
+- `size` (integer): Exact size in bytes of the chunk file on disk.
 - `sha256` (string, hex): SHA-256 digest of the chunk file.
 
 ---
 
-## 3. Cryptographic Specifications
+## 3. Cryptographic Standards & Compatibility
 
 ### 3.1 Authorship Signature (Ed25519)
-1. The manifest dictionary is duplicated and the `security.signature` key is removed.
-2. The remaining dictionary is serialized into deterministic canonical JSON bytes:
-   - Sorted keys (`sort_keys=True`).
-   - Compact separators: `separators=(',', ':')`.
-   - UTF-8 encoded.
-3. The canonical JSON bytes are signed with the author's Ed25519 private key.
+1. Manifest dictionary is duplicated and the `security.signature` key is removed.
+2. Canonical JSON serialization:
+   - Keys sorted lexicographically (`sort_keys=True`).
+   - Compact separators with no extraneous whitespace: `separators=(',', ':')`.
+   - UTF-8 byte encoding.
+3. Ed25519 signature is generated over the canonical JSON bytes.
+4. Anyone can verify authorship using the author's public key without requiring decryption keys.
 
-### 3.2 Payload Encryption (AES-256-GCM)
-1. **Key Derivation**: 256-bit symmetric AES key derived using `scrypt` (N=16384, r=8, p=1, dklen=32).
-2. **Chunk Binary Format**:
+### 3.2 Payload Encryption & Nonce Isolation (AES-256-GCM)
+1. **Key Derivation**: 256-bit symmetric AES key derived using memory-hard `scrypt` (preventing GPU/ASIC password cracking).
+2. **Chunk Binary Layout**:
    ```
    [12-byte Nonce] + [Ciphertext] + [16-byte GCM Authentication Tag]
    ```
@@ -104,7 +108,7 @@ Must be `"b2chks"`, `"b2chks-v1"`, or backward-compatible `"chunk-core-v1"`.
    ```
    AAD = uint32_be(chunk_index)
    ```
-   *Security Guarantee:* Binding the chunk index into AAD prevents chunk reordering, truncation, or cross-package splicing attacks.
+   *Security Guarantee:* Binding `chunk_index` into GCM authenticated data prevents chunk reordering, truncation, or cross-package splicing attacks.
 
 ---
 

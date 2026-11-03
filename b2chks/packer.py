@@ -133,14 +133,15 @@ def pack(
     else:
         read_chunk_size = chunk_size
 
-    # 2. Parallel chunk worker pool
+    # 2. Bounded parallel chunk worker pool to keep memory usage constant regardless of file size
     max_workers = workers if workers and workers > 0 else min(32, (os.cpu_count() or 4) * 2)
+    max_in_flight = max_workers * 2
     chunks_meta = []
-    chunk_tasks = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         chunk_index = 0
-        with open(temp_archive, "rb") as src_f:
+        in_flight = {}
+        with open(temp_archive, "rb", buffering=4*1024*1024) as src_f:
             while True:
                 if cancel_token and cancel_token():
                     if temp_archive.exists():
@@ -162,17 +163,31 @@ def pack(
                     aes_key,
                     out_dir,
                 )
-                chunk_tasks.append(fut)
+                in_flight[fut] = chunk_index
                 chunk_index += 1
+
+                # If we reached max in-flight tasks, wait for at least one to complete
+                while len(in_flight) >= max_in_flight:
+                    done, _ = concurrent.futures.wait(in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+                    for d in done:
+                        meta = d.result()
+                        chunks_meta.append(meta)
+                        del in_flight[d]
+                        if progress_callback:
+                            progress_callback(len(chunks_meta), chunk_index, "chunking")
 
                 if not chunk_data:
                     break
 
-        for i, fut in enumerate(chunk_tasks):
-            meta = fut.result()
-            chunks_meta.append(meta)
-            if progress_callback:
-                progress_callback(i + 1, len(chunk_tasks), "chunking")
+            # Drain remaining tasks
+            while in_flight:
+                done, _ = concurrent.futures.wait(in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+                for d in done:
+                    meta = d.result()
+                    chunks_meta.append(meta)
+                    del in_flight[d]
+                    if progress_callback:
+                        progress_callback(len(chunks_meta), chunk_index, "chunking")
 
     chunks_meta.sort(key=lambda x: x["index"])
 

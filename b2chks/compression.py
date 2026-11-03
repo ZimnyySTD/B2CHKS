@@ -95,6 +95,30 @@ def compress_stream(
     else:
         raise CompressionError(f"Unsupported source path: {source_path}")
 
+def _safe_extract_tar(tar: tarfile.TarFile, target_dir: Path):
+    """Safely extract tar archive with strict path traversal protection across all Python versions."""
+    target_dir_resolved = target_dir.resolve()
+    for member in tar.getmembers():
+        # Prevent absolute paths or path traversal with '..'
+        member_path = (target_dir / member.name).resolve()
+        try:
+            member_path.relative_to(target_dir_resolved)
+        except ValueError:
+            raise CompressionError(f"Attempted path traversal in archive: {member.name}")
+
+        # Check symlinks and hardlinks
+        if member.islnk() or member.issym():
+            link_target = (member_path.parent / member.linkname).resolve()
+            try:
+                link_target.relative_to(target_dir_resolved)
+            except ValueError:
+                raise CompressionError(f"Attempted symlink traversal in archive: {member.name} -> {member.linkname}")
+
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(path=target_dir, filter="data")
+    else:
+        tar.extractall(path=target_dir)
+
 def decompress_stream(
     archive_path: Path,
     output_dir: Path,
@@ -102,7 +126,7 @@ def decompress_stream(
     source_type: str,
     algorithm: str = "gzip",
 ) -> Path:
-    """Decompress an archive to target_name inside output_dir with path traversal protection."""
+    """Decompress an archive to target_name inside output_dir with strict path traversal protection."""
     output_dir.mkdir(parents=True, exist_ok=True)
     destination_path = output_dir / target_name
     algo = algorithm.lower()
@@ -117,20 +141,19 @@ def decompress_stream(
                 shutil.copyfileobj(gz_in, f_out)
     elif source_type == "directory":
         if algo == "zstd" and HAVE_ZSTANDARD:
+            temp_tar = output_dir / f".tmp_{target_name}.tar"
             dctx = zstd.ZstdDecompressor()
-            with open(archive_path, "rb") as f_in:
-                with dctx.stream_reader(f_in) as reader:
-                    with tarfile.open(fileobj=reader, mode="r|") as tar:
-                        if hasattr(tarfile, "data_filter"):
-                            tar.extractall(path=output_dir, filter="data")
-                        else:
-                            tar.extractall(path=output_dir)
+            try:
+                with open(archive_path, "rb") as f_in, open(temp_tar, "wb") as f_out:
+                    dctx.copy_stream(f_in, f_out)
+                with tarfile.open(temp_tar, "r:") as tar:
+                    _safe_extract_tar(tar, output_dir)
+            finally:
+                if temp_tar.exists():
+                    temp_tar.unlink()
         else:
             with tarfile.open(archive_path, "r:gz") as tar:
-                if hasattr(tarfile, "data_filter"):
-                    tar.extractall(path=output_dir, filter="data")
-                else:
-                    tar.extractall(path=output_dir)
+                _safe_extract_tar(tar, output_dir)
     else:
         raise CompressionError(f"Unknown source type: {source_type}")
 

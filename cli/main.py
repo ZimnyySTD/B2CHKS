@@ -10,7 +10,6 @@ from b2chks.exceptions import B2CHKSError
 from b2chks.extractor import verify, extract
 from b2chks.packer import pack
 from b2chks.signing import generate_keypair
-import install
 
 
 def main(custom_argv: Optional[List[str]] = None):
@@ -119,6 +118,11 @@ def main(custom_argv: Optional[List[str]] = None):
                 sys.exit(1)
 
         elif args.command in ["uninstall", "remove"]:
+            try:
+                import install
+            except ImportError:
+                sys.path.insert(0, str(Path(__file__).parent.parent))
+                import install
             ok = install.uninstall()
             if not ok:
                 sys.exit(1)

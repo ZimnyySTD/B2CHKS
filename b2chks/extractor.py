@@ -5,7 +5,7 @@ import os
 import sys
 from hashlib import sha256
 from pathlib import Path
-from typing import Optional, Callable, Dict, Any, Tuple
+from typing import Optional, Callable, Dict, Any, Tuple, List
 
 from b2chks.compression import decompress_stream
 from b2chks.encryption import (
@@ -238,7 +238,10 @@ def extract(
 
     try:
         max_workers = workers if workers and workers > 0 else min(32, (os.cpu_count() or 4) * 2)
-        raw_chunks = []
+        max_in_flight = max_workers * 2
+
+        # Resolve paths for all chunks upfront
+        chunk_paths: List[Tuple[int, Path]] = []
         for chunk_info in chunks:
             idx = chunk_info["index"]
             expected_hash = chunk_info["sha256"]
@@ -252,29 +255,51 @@ def extract(
                 print(f"[-] Could not find chunk file for index {idx} (hash {expected_hash})")
                 return False
 
-            raw_chunks.append((idx, cf_path.read_bytes()))
+            chunk_paths.append((idx, cf_path))
 
-        decrypted_map: Dict[int, bytes] = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(_decrypt_chunk_worker, idx, raw_chunk, is_encrypted, aes_key)
-                for idx, raw_chunk in raw_chunks
-            ]
-            for i, fut in enumerate(futures):
-                if cancel_token and cancel_token():
-                    raise CancelledError("Extraction cancelled by user")
-                try:
-                    idx, chunk_bytes = fut.result()
-                    decrypted_map[idx] = chunk_bytes
-                    if progress_callback:
-                        progress_callback(i + 1, len(futures), "decrypting")
-                except Exception:
-                    print("[-] Cryptographic authentication layer rejected decryption key or corrupted data.")
-                    return False
+        # Stream decrypt in bounded sliding window and write sequentially
+        with open(temp_reassembled, "wb", buffering=4*1024*1024) as out_f:
+            decrypted_buffer: Dict[int, bytes] = {}
+            next_write_idx = 0
+            total_chunks = len(chunk_paths)
 
-        with open(temp_reassembled, "wb") as out_f:
-            for idx in range(len(chunks)):
-                out_f.write(decrypted_map[idx])
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                in_flight: Dict[concurrent.futures.Future, int] = {}
+                submit_iter = iter(chunk_paths)
+
+                while next_write_idx < total_chunks:
+                    if cancel_token and cancel_token():
+                        raise CancelledError("Extraction cancelled by user")
+
+                    # Fill worker pool up to max_in_flight
+                    while len(in_flight) < max_in_flight:
+                        try:
+                            idx, cpath = next(submit_iter)
+                            raw_chunk = cpath.read_bytes()
+                            fut = executor.submit(_decrypt_chunk_worker, idx, raw_chunk, is_encrypted, aes_key)
+                            in_flight[fut] = idx
+                        except StopIteration:
+                            break
+
+                    if not in_flight:
+                        break
+
+                    done, _ = concurrent.futures.wait(in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+                    for d in done:
+                        try:
+                            c_idx, chunk_bytes = d.result()
+                            decrypted_buffer[c_idx] = chunk_bytes
+                            del in_flight[d]
+                        except Exception:
+                            print("[-] Cryptographic authentication layer rejected decryption key or corrupted data.")
+                            return False
+
+                    # Flush contiguous chunks in order to disk
+                    while next_write_idx in decrypted_buffer:
+                        out_f.write(decrypted_buffer.pop(next_write_idx))
+                        next_write_idx += 1
+                        if progress_callback:
+                            progress_callback(next_write_idx, total_chunks, "decrypting")
 
         destination_path = decompress_stream(
             temp_reassembled,
