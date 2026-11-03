@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import b2chks
+import install
 from b2chks import B2CHKS
 
 
@@ -61,14 +62,11 @@ def test_pure_python_crypto():
 def test_anti_brute_force_scrypt_kdf():
     salt = os.urandom(16)
     passphrase = "UltraSecurePassword!"
-    # Derive with memory-hard scrypt
     key_scrypt = b2chks.derive_aes_key(passphrase, salt, kdf_name="scrypt")
     assert len(key_scrypt) == 32
 
-    # Derive with PBKDF2
     key_pbkdf2 = b2chks.derive_aes_key(passphrase, salt, kdf_name="pbkdf2")
     assert len(key_pbkdf2) == 32
-    # Ensure they produce distinct, non-overlapping derived keys
     assert key_scrypt != key_pbkdf2
 
 
@@ -82,7 +80,6 @@ def test_sdk_api_and_progress_callback(tmp_path):
     def on_progress(current, total, stage):
         progress_events.append((current, total, stage))
 
-    # Test B2CHKS class methods
     priv, pub = B2CHKS.keygen(author="sdk_dev", out_dir=str(tmp_path / "keys"))
     dist_dir = tmp_path / "sdk_dist"
     ext_dir = tmp_path / "sdk_ext"
@@ -101,10 +98,8 @@ def test_sdk_api_and_progress_callback(tmp_path):
     assert len(progress_events) > 0
     assert any(stage == "chunking" for _, _, stage in progress_events)
 
-    # Verify via SDK
     assert B2CHKS.verify(str(manifest_path), public_key=pub)
 
-    # Extract via SDK
     ok = B2CHKS.extract(str(manifest_path), output_dir=str(ext_dir), decrypt_key="SdkPassphrase", public_key=pub)
     assert ok
     assert (ext_dir / "sdk_test.dat").read_bytes() == content
@@ -140,10 +135,8 @@ def test_pack_and_extract_single_file_unencrypted(tmp_path):
     assert len(manifest["security"]["signature"]) > 0
     assert len(manifest["chunks"]) > 1
 
-    # Verify
     assert b2chks.verify(str(manifest_path), public_key_path=pub)
 
-    # Extract
     success = b2chks.extract(str(manifest_path), output_dir=str(extract_dir), public_key_path=pub)
     assert success
 
@@ -179,10 +172,8 @@ def test_pack_and_extract_directory_encrypted(tmp_path):
     assert manifest["encryption"]["algorithm"] == "AES-256-GCM"
     assert manifest["encryption"]["kdf"] == "scrypt"
 
-    # Verify
     assert b2chks.verify(str(manifest_path))
 
-    # Extraction with wrong key should fail
     fail_success = b2chks.extract(
         str(manifest_path),
         output_dir=str(extract_dir),
@@ -190,7 +181,6 @@ def test_pack_and_extract_directory_encrypted(tmp_path):
     )
     assert not fail_success
 
-    # Extraction with correct key
     ok = b2chks.extract(
         str(manifest_path),
         output_dir=str(extract_dir),
@@ -305,7 +295,6 @@ def test_verification_tampered_manifest_signature(tmp_path):
 
 
 def test_core_py_and_core_pykeygen_cli(tmp_path):
-    # Test `python core.pykeygen --author "arcxan"`
     res = subprocess.run(
         [sys.executable, "core.pykeygen", "--author", "arcxan", "--out-dir", str(tmp_path / "keys")],
         capture_output=True,
@@ -315,7 +304,6 @@ def test_core_py_and_core_pykeygen_cli(tmp_path):
     assert (tmp_path / "keys" / "private.pem").exists()
     assert (tmp_path / "keys" / "public.pem").exists()
 
-    # Test `python core.py pack ./folder --chunk-size 500m --encrypt-key "MySecretPassphrase123"`
     src_folder = tmp_path / "my_game_folder"
     src_folder.mkdir()
     (src_folder / "game.bin").write_bytes(b"\xaa\xbb" * 1000)
@@ -340,7 +328,6 @@ def test_core_py_and_core_pykeygen_cli(tmp_path):
     manifest = tmp_path / "dist_core" / "manifest.json"
     assert manifest.exists()
 
-    # Test extraction via `core.py`
     res = subprocess.run(
         [
             sys.executable,
@@ -357,3 +344,26 @@ def test_core_py_and_core_pykeygen_cli(tmp_path):
     )
     assert res.returncode == 0
     assert (tmp_path / "ext_core" / "my_game_folder" / "game.bin").read_bytes() == (b"\xaa\xbb" * 1000)
+
+
+def test_installer_reinstall_and_uninstall():
+    # Install
+    install.install()
+    assert install.is_installed()
+
+    # Reinstall replaces cleanly
+    install.install()
+    assert install.is_installed()
+
+    # Uninstall
+    ok = install.uninstall()
+    assert ok
+    assert not install.is_installed()
+
+    # Uninstalling again reports not installed
+    ok2 = install.uninstall()
+    assert not ok2
+
+    # Reinstall back for system use
+    install.install()
+    assert install.is_installed()
