@@ -209,21 +209,44 @@ def load_public_key_bytes(pub_source: Any) -> Optional[bytes]:
     return None
 
 def sign_data(data: bytes, priv_path: Path) -> Optional[Tuple[str, str]]:
-    """Sign data using Ed25519. Returns (signature_hex, public_key_hex)."""
+    """Sign data using Ed25519. Uses native cryptography if available, else pure Python."""
     seed = load_private_key_seed(priv_path)
     if not seed:
         return None
+
+    if HAVE_CRYPTOGRAPHY:
+        try:
+            priv_obj = crypto_ed25519.Ed25519PrivateKey.from_private_bytes(seed)
+            sig_bytes = priv_obj.sign(data)
+            pub_obj = priv_obj.public_key()
+            pub_bytes = pub_obj.public_bytes(
+                encoding=crypto_serialization.Encoding.Raw,
+                format=crypto_serialization.PublicFormat.Raw,
+            )
+            return sig_bytes.hex(), pub_bytes.hex()
+        except Exception:
+            pass
+
     pub = _ed_publickey(seed)
     sig = _ed_sign(data, seed, pub)
     return sig.hex(), pub.hex()
 
 def verify_signature(data: bytes, signature_hex: str, pub_source: Any) -> bool:
-    """Verify Ed25519 signature."""
+    """Verify Ed25519 signature. Uses native cryptography if available, else pure Python."""
     try:
         pub = load_public_key_bytes(pub_source)
         if not pub:
             return False
         sig = bytes.fromhex(signature_hex)
+
+        if HAVE_CRYPTOGRAPHY:
+            try:
+                pub_obj = crypto_ed25519.Ed25519PublicKey.from_public_bytes(pub)
+                pub_obj.verify(sig, data)
+                return True
+            except Exception:
+                return False
+
         return _ed_verify(sig, data, pub)
     except Exception:
         return False
