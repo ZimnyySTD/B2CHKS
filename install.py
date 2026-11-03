@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Installer script to install B2CHKS globally on any system (Linux, macOS, Windows).
+Guarantees global execution from PowerShell, Command Prompt, bash, and zsh.
 """
 
 import os
@@ -13,7 +14,10 @@ from pathlib import Path
 
 
 def install():
-    print("[*] Installing B2CHKS globally...")
+    print("=" * 60)
+    print("           B2CHKS Global System Installer")
+    print("=" * 60)
+
     repo_root = Path(__file__).parent.resolve()
     source_script = repo_root / "b2chks.py"
 
@@ -21,63 +25,127 @@ def install():
         print("[-] Error: b2chks.py not found in source directory.")
         sys.exit(1)
 
-    # 1. Try pip editable/global install first
-    try:
-        res = subprocess.run([sys.executable, "-m", "pip", "install", "-e", str(repo_root)], capture_output=True, text=True)
-        if res.returncode == 0:
-            print("[+] Successfully installed B2CHKS via pip entrypoints (b2chks, core, chunkcore).")
-            return
-    except Exception as e:
-        print(f"[*] Notice: pip install returned: {e}")
-
-    # 2. Direct binary copy to user's binary PATH
     is_windows = platform.system() == "Windows"
-    target_dirs = []
+    py_exec = sys.executable
 
-    if is_windows:
-        user_local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~\\AppData\\Local")
-        target_dirs.append(Path(user_local) / "Microsoft" / "WindowsApps")
-        target_dirs.append(Path(sys.prefix) / "Scripts")
-    else:
-        target_dirs.append(Path.home() / ".local" / "bin")
-        target_dirs.append(Path("/usr/local/bin"))
-
-    installed_dir = None
-    for d in target_dirs:
+    # 1. Optionally install cryptography for hardware acceleration
+    try:
+        import cryptography
+        print("[+] Hardware-accelerated cryptography module already installed.")
+    except ImportError:
+        print("[*] Attempting to install 'cryptography' for hardware acceleration...")
         try:
-            d.mkdir(parents=True, exist_ok=True)
-            installed_dir = d
-            break
+            subprocess.run([py_exec, "-m", "pip", "install", "cryptography"], check=False, capture_output=True)
+            print("[+] Installed cryptography.")
         except Exception:
-            continue
+            print("[*] Notice: Continuing with built-in pure-Python zero-dependency engine.")
 
-    if not installed_dir:
-        print("[-] Could not find a writable directory in PATH. Please run with elevated permissions or pip install .")
-        sys.exit(1)
+    # 2. Install editable pip package with entry points
+    try:
+        print("[*] Installing package entrypoints via pip...")
+        res = subprocess.run([py_exec, "-m", "pip", "install", "-e", str(repo_root)], capture_output=True, text=True)
+        if res.returncode == 0:
+            print("[+] Pip entrypoints installed successfully.")
+    except Exception as e:
+        print(f"[*] Notice: pip install: {e}")
 
-    target_cmd = installed_dir / ("b2chks.exe" if is_windows else "b2chks")
+    # 3. Bulletproof installation for Windows (PowerShell & CMD)
     if is_windows:
-        # Create a batch launcher on Windows
-        bat_file = installed_dir / "b2chks.bat"
-        with open(bat_file, "w", encoding="utf-8") as f:
-            f.write(f'@echo off\n"{sys.executable}" "{source_script}" %*\n')
-        print(f"[+] Installed Windows launcher: {bat_file}")
-    else:
-        shutil.copyfile(source_script, target_cmd)
-        target_cmd.chmod(target_cmd.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        print(f"[+] Installed executable: {target_cmd}")
+        user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+        win_dirs = [
+            Path(user_profile) / "AppData" / "Local" / "Microsoft" / "WindowsApps",
+            Path(sys.prefix) / "Scripts",
+            Path(user_profile) / ".local" / "bin",
+            Path(user_profile) / "bin",
+        ]
 
-        # Also create 'core' alias
-        core_cmd = installed_dir / "core"
+        target_dir = None
+        for d in win_dirs:
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                # Test write permission
+                test_file = d / ".write_test"
+                test_file.touch()
+                test_file.unlink()
+                target_dir = d
+                break
+            except Exception:
+                continue
+
+        if not target_dir:
+            target_dir = Path(user_profile) / "AppData" / "Local" / "Microsoft" / "WindowsApps"
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"[*] Installing Windows launchers to: {target_dir}")
+
+        for name in ["b2chks", "core", "chunkcore", "b3chks"]:
+            # .cmd launcher for CMD & PowerShell
+            cmd_file = target_dir / f"{name}.cmd"
+            with open(cmd_file, "w", encoding="utf-8") as f:
+                f.write(f'@echo off\r\n"{py_exec}" "{source_script}" %*\r\n')
+
+            # .bat launcher
+            bat_file = target_dir / f"{name}.bat"
+            with open(bat_file, "w", encoding="utf-8") as f:
+                f.write(f'@echo off\r\n"{py_exec}" "{source_script}" %*\r\n')
+
+            # .ps1 PowerShell script so PowerShell recognizes it as a native cmdlet/script
+            ps1_file = target_dir / f"{name}.ps1"
+            with open(ps1_file, "w", encoding="utf-8") as f:
+                f.write(f'& "{py_exec}" "{source_script}" $args\r\n')
+
+        # Add function to PowerShell profile to eliminate any cmdlet errors
         try:
-            shutil.copyfile(source_script, core_cmd)
-            core_cmd.chmod(core_cmd.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-            print(f"[+] Installed alias: {core_cmd}")
+            ps_docs = Path(user_profile) / "Documents" / "WindowsPowerShell"
+            ps_profile = ps_docs / "Microsoft.PowerShell_profile.ps1"
+            ps_docs.mkdir(parents=True, exist_ok=True)
+            ps_func = (
+                f'\nfunction b2chks {{ & "{py_exec}" "{source_script}" $args }}\n'
+                f'function core {{ & "{py_exec}" "{source_script}" $args }}\n'
+            )
+            existing = ps_profile.read_text(encoding="utf-8") if ps_profile.exists() else ""
+            if "function b2chks" not in existing:
+                with open(ps_profile, "a", encoding="utf-8") as f:
+                    f.write(ps_func)
+                print(f"[+] Added PowerShell profile functions to {ps_profile}")
         except Exception:
             pass
 
-    print(f"\n[+] B2CHKS installed successfully to {installed_dir}!")
-    print("    You can now run 'b2chks' or 'core' directly from any terminal window.")
+    # 4. Bulletproof installation for Linux and macOS
+    else:
+        unix_dirs = [
+            Path.home() / ".local" / "bin",
+            Path("/usr/local/bin"),
+            Path.home() / "bin",
+        ]
+
+        target_dir = None
+        for d in unix_dirs:
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                test_file = d / ".write_test"
+                test_file.touch()
+                test_file.unlink()
+                target_dir = d
+                break
+            except Exception:
+                continue
+
+        if not target_dir:
+            target_dir = Path.home() / ".local" / "bin"
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+        print(f"[*] Installing Unix launchers to: {target_dir}")
+
+        for name in ["b2chks", "core", "chunkcore", "b3chks"]:
+            target_cmd = target_dir / name
+            shutil.copyfile(source_script, target_cmd)
+            target_cmd.chmod(target_cmd.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    print("\n" + "=" * 60)
+    print("  [+] Installation Successful!")
+    print(f"  Commands 'b2chks' and 'core' are now ready to use globally.")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

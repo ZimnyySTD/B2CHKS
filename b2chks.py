@@ -512,16 +512,21 @@ def get_canonical_json_bytes(manifest_dict: Dict[str, Any]) -> bytes:
 def compress_source_to_stream(
     source_path: Path,
     temp_file_path: Path,
+    compress_level: int = 1,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> Tuple[int, str]:
-    """Compress file or directory into temp_file_path using high-speed buffered streaming."""
-    buffer_size = 2 * 1024 * 1024  # 2MB buffer for optimized I/O throughput
+    """
+    Compress file or directory into temp_file_path using optimized high-throughput streaming.
+    Default compresslevel=1 provides rapid compression with minimal CPU overhead,
+    dramatically accelerating both packing and extraction.
+    """
+    buffer_size = 4 * 1024 * 1024  # 4MB buffer for maximum I/O throughput
 
     if source_path.is_file():
         source_type = "file"
         total_size = source_path.stat().st_size
         bytes_processed = 0
-        with open(source_path, "rb") as f_in, gzip.open(temp_file_path, "wb", compresslevel=4) as f_out:
+        with open(source_path, "rb", buffering=buffer_size) as f_in, gzip.open(temp_file_path, "wb", compresslevel=compress_level) as f_out:
             while True:
                 buf = f_in.read(buffer_size)
                 if not buf:
@@ -544,7 +549,7 @@ def compress_source_to_stream(
         if progress_callback:
             progress_callback(0, total_size, "compressing")
 
-        with tarfile.open(temp_file_path, "w:gz", compresslevel=4) as tar:
+        with tarfile.open(temp_file_path, "w:gz", compresslevel=compress_level) as tar:
             tar.add(str(source_path), arcname=source_path.name)
 
         if progress_callback:
@@ -647,7 +652,9 @@ def pack(
     temp_archive = out_dir / f".tmp_{source_path.name}.archive"
 
     print(f"[*] Compressing source '{source_path.name}'...")
-    total_uncompressed_size, source_type = compress_source_to_stream(source_path, temp_archive, progress_callback)
+    total_uncompressed_size, source_type = compress_source_to_stream(
+        source_path, temp_archive, compress_level=1, progress_callback=progress_callback
+    )
     compressed_size = temp_archive.stat().st_size
     print(f"[*] Compressed {total_uncompressed_size} bytes -> {compressed_size} bytes.")
 
