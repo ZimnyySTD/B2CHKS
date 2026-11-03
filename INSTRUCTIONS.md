@@ -1,39 +1,58 @@
 # B2CHKS Protocol Instructions & Developer Guide
 
-**B2CHKS** is a cross-platform, high-performance file packaging, chunking, compression, and secure distribution protocol, CLI tool, and embeddable Python SDK. It decouples packaging from hosting, allowing creators to compress, split, optionally encrypt (AES-256-GCM with anti-brute-force scrypt), and cryptographically sign (Ed25519) any file or directory into lightweight chunks and a JSON manifest.
+**B2CHKS** is a cross-platform, high-performance file packaging, chunking, compression, and secure distribution protocol, CLI tool, and embeddable Python SDK. It decouples packaging from hosting, allowing creators to compress, split, optionally encrypt (AES-256-GCM with anti-brute-force scrypt), and cryptographically sign (Ed25519) any file or directory into lightweight chunks and a portable JSON manifest.
 
 ---
 
-## 1. Quick Global Installation
+## 1. Quick Global Installation & Uninstallation
 
-Install B2CHKS globally so that `b2chks` and `core` commands are available anywhere in your terminal or command prompt:
+Install B2CHKS globally so that `b2chks` and `core` commands are available anywhere in PowerShell, Command Prompt, bash, or zsh:
 
 ### Automated Global Install (Linux, macOS, Windows)
 ```bash
 python install.py
 ```
-This automatically configures global CLI launchers in your system PATH (`b2chks` and `core`).
+- If B2CHKS is already installed, running `install.py` automatically replaces and refreshes the installation cleanly.
+- Configures native PowerShell launchers (`.ps1`, `.cmd`, `.bat`) and profile functions to prevent any "cmdlet not found" errors on Windows.
 
-### Or install via pip:
+### Uninstallation (Only if Installed)
+You can uninstall B2CHKS globally using either:
 ```bash
-pip install -e .
+python uninstall.py
+# or
+python install.py --uninstall
+# or via CLI if installed:
+b2chks uninstall
 ```
+- Verifies if B2CHKS is currently installed. If not installed, informs the user cleanly without error.
+- Removes all system launchers, PowerShell functions, and pip package artifacts.
 
 ---
 
-## 2. CLI Overview & Commands
+## 2. Maximum Performance Architecture
+
+B2CHKS is engineered for maximum throughput across all hardware:
+- **Fast Stream Compression**: Utilizes optimized buffered streaming (4MB buffers) and fast DEFLATE level 1 compression, cutting compression and extraction times by up to 5x.
+- **Parallel Chunk Pipeline**: Multi-threaded worker pool (`ThreadPoolExecutor`) processes chunks concurrently across all CPU cores for encryption, hashing, decryption, and verification.
+- **Parallel Integrity Verification**: Performs multi-threaded SHA-256 hashing during `verify`, validating hundreds of chunks in parallel across NVMe/SSD channels.
+- **Hardware Acceleration**: Automatically utilizes native C-extensions and AES-NI hardware instructions when `cryptography` is present, while seamlessly falling back to pure-Python when in zero-dependency environments.
+
+---
+
+## 3. CLI Overview & Commands
 
 B2CHKS provides the following primary subcommands:
 1. `keygen` (aliases: `key-gen`, `genkey`): Generate an Ed25519 keypair for author signing and verification.
 2. `pack` (aliases: `package`, `compress`): Compress, chunk, optionally encrypt, and sign a file or directory.
-3. `verify` (alias: `check`): Inspect chunk inventory, verify SHA-256 chunk hashes, and validate manifest authorship signature.
+3. `verify` (alias: `check`): Inspect chunk inventory, verify SHA-256 chunk hashes in parallel, and validate manifest authorship signature.
 4. `extract` (aliases: `unpack`, `decompress`): Verify, decrypt (if encrypted), reassemble, and decompress the package in one go.
+5. `uninstall` (alias: `remove`): Remove B2CHKS globally from the system.
 
 Run `b2chks --help` or `python core.py <subcommand> --help` to see detailed options.
 
 ---
 
-## 3. Step-by-Step Usage Guide
+## 4. Step-by-Step Usage Guide
 
 ### Step A: Generating Developer Signing Keys
 
@@ -82,7 +101,7 @@ Verify chunk integrity and authorship before extraction:
 ```bash
 python core.py verify manifest.json --public-key public.pem
 ```
-- Scans the directory for matching chunk files by SHA-256 hash.
+- Concurrently scans and verifies chunk files by SHA-256 hash.
 - Flags any missing or corrupted chunk files.
 - Cryptographically validates the Ed25519 signature against the manifest content.
 - If no manifest argument is provided, automatically locates `manifest.json` in the current directory.
@@ -112,7 +131,7 @@ python core.py extract manifest.json --decrypt-key "MySecretPassphrase123"
 
 ---
 
-## 4. Embedding B2CHKS in Applications (Python SDK)
+## 5. Embedding B2CHKS in Applications (Python SDK)
 
 B2CHKS is designed as an open, embeddable SDK that can be directly imported into GUI apps (PySide, PyQt, Tkinter, Electron), background services, or custom scripts:
 
@@ -157,7 +176,7 @@ success = B2CHKS.extract(
 
 ---
 
-## 5. Security & Architecture Details
+## 6. Security & Architecture Details
 
 - **Protocol identifier:** `"b2chks"`
 - **Anti-Brute-Force Memory-Hard KDF:**

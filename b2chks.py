@@ -822,12 +822,19 @@ def verify(
         print("[-] Error: Manifest contains no chunk definitions.")
         return False
 
+    # Fast parallel chunk file hashing and verification
+    max_workers = min(32, (os.cpu_count() or 4) * 2)
+
+    def _hash_file(p: Path) -> Tuple[Path, str]:
+        with open(p, "rb") as f:
+            return p, sha256(f.read()).hexdigest()
+
+    # Pre-hash all candidate files concurrently if needed
+    chunk_files = [p for p in c_dir.iterdir() if p.is_file() and p.resolve() != mpath.resolve()]
     file_hashes: Dict[str, Path] = {}
-    for p in c_dir.iterdir():
-        if p.is_file() and p.resolve() != mpath.resolve():
-            with open(p, "rb") as f:
-                h = sha256(f.read()).hexdigest()
-                file_hashes[h] = p
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for p, h in executor.map(_hash_file, chunk_files):
+            file_hashes[h] = p
 
     all_valid = True
     missing_chunks = []
@@ -843,8 +850,13 @@ def verify(
 
         cf_path = c_dir / expected_name
         if cf_path.exists():
-            with open(cf_path, "rb") as cf:
-                actual_hash = sha256(cf.read()).hexdigest()
+            actual_hash = file_hashes.get(cf_path)
+            # Find hash if not in file_hashes
+            if not actual_hash:
+                for h, p in file_hashes.items():
+                    if p == cf_path:
+                        actual_hash = h
+                        break
             if actual_hash == expected_hash:
                 continue
             else:
@@ -1161,6 +1173,9 @@ def main(custom_argv: Optional[List[str]] = None):
         parser_extract.add_argument("--decrypt-key", "--decrypt_key", "-e", dest="decrypt_key", type=str, default=None, help="Decryption key passphrase (prompts if omitted and encrypted)")
         parser_extract.add_argument("--public-key", "--public_key", "-k", dest="public_key", type=str, default=None, help="Path to Ed25519 public.pem to verify signature")
 
+    for name in ["uninstall", "remove"]:
+        subparsers.add_parser(name, help="Uninstall B2CHKS globally from system")
+
     args = parser.parse_args(raw_argv)
 
     if not args.command:
@@ -1192,6 +1207,12 @@ def main(custom_argv: Optional[List[str]] = None):
                 chunks_dir=args.chunks_dir,
                 public_key_path=args.public_key,
             )
+            if not ok:
+                sys.exit(1)
+
+        elif args.command in ["uninstall", "remove"]:
+            import install
+            ok = install.uninstall()
             if not ok:
                 sys.exit(1)
 
