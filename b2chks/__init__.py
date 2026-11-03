@@ -19,8 +19,7 @@ from b2chks.encryption import derive_aes_key, encrypt_aes_gcm, decrypt_aes_gcm
 from b2chks.chunking import parse_size
 from b2chks.manifest import load_manifest, write_manifest, get_canonical_json_bytes
 from b2chks.backends import get_backend_info, HAVE_CRYPTOGRAPHY, HAVE_ZSTANDARD
-from b2chks.signing import _ed_publickey, _ed_sign, _ed_verify
-from b2chks.encryption import _py_aes_gcm_encrypt, _py_aes_gcm_decrypt
+from b2chks.backends import require_cryptography, require_zstandard
 
 def main(*args, **kwargs):
     """Lazy CLI entrypoint to avoid circular import issues."""

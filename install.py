@@ -2,7 +2,7 @@
 """
 Installer & Uninstaller script for B2CHKS globally on any system (Linux, macOS, Windows).
 Guarantees global execution from PowerShell, Command Prompt, bash, and zsh.
-Supports replacing existing installations and safe uninstallation.
+Ensures native performance dependencies are installed.
 """
 
 import argparse
@@ -34,7 +34,6 @@ def get_install_locations():
 
 def is_installed() -> bool:
     """Check if B2CHKS is currently installed anywhere on the system."""
-    # Check pip installation
     try:
         res = subprocess.run([sys.executable, "-m", "pip", "show", "b2chks"], capture_output=True, text=True)
         if res.returncode == 0:
@@ -42,7 +41,6 @@ def is_installed() -> bool:
     except Exception:
         pass
 
-    # Check launcher files
     cmd_names = ["b2chks", "core", "chunkcore", "b3chks"]
     exts = [".cmd", ".bat", ".ps1", ""] if platform.system() == "Windows" else [""]
     for loc in get_install_locations():
@@ -67,7 +65,6 @@ def uninstall():
     print("[*] Found existing B2CHKS installation. Removing...")
     removed_items = 0
 
-    # 1. Remove pip installation
     try:
         res = subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "b2chks"], capture_output=True, text=True)
         if res.returncode == 0:
@@ -76,7 +73,6 @@ def uninstall():
     except Exception as e:
         print(f"[*] Notice: pip uninstall: {e}")
 
-    # 2. Remove launchers from all potential directories
     cmd_names = ["b2chks", "core", "chunkcore", "b3chks"]
     exts = [".cmd", ".bat", ".ps1", ""] if platform.system() == "Windows" else [""]
     for loc in get_install_locations():
@@ -92,7 +88,6 @@ def uninstall():
                         except Exception as e:
                             print(f"[!] Warning: Could not remove {target}: {e}")
 
-    # 3. Clean up Windows PowerShell profile if present
     if platform.system() == "Windows":
         user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
         ps_docs = Path(user_profile) / "Documents" / "WindowsPowerShell"
@@ -118,10 +113,9 @@ def uninstall():
 
 def install():
     print("=" * 60)
-    print("           B2CHKS Global System Installer")
+    print("      B2CHKS Native Performance Global Installer")
     print("=" * 60)
 
-    # Check if an existing installation is present. If so, replace it cleanly.
     if is_installed():
         print("[*] Existing B2CHKS installation detected. Replacing and updating...")
         uninstall()
@@ -137,17 +131,13 @@ def install():
     is_windows = platform.system() == "Windows"
     py_exec = sys.executable
 
-    # 1. Optionally install/verify cryptography for native hardware acceleration
-    try:
-        import cryptography
-        print("[+] Hardware-accelerated cryptography module active.")
-    except ImportError:
-        print("[*] Attempting to install 'cryptography' for hardware acceleration...")
-        try:
-            subprocess.run([py_exec, "-m", "pip", "install", "cryptography"], check=False, capture_output=True)
-            print("[+] Installed cryptography.")
-        except Exception:
-            print("[*] Notice: Continuing with built-in pure-Python zero-dependency engine.")
+    # 1. Install required native dependencies
+    print("[*] Installing required native performance backends (cryptography)...")
+    res_crypto = subprocess.run([py_exec, "-m", "pip", "install", "cryptography>=3.4"], check=False, capture_output=True, text=True)
+    if res_crypto.returncode == 0:
+        print("[+] Native cryptography installed/verified.")
+    else:
+        print("[!] Warning: Could not install cryptography via pip. Native crypto is required for B2CHKS.")
 
     # 2. Install editable pip package with entry points
     try:
@@ -187,22 +177,18 @@ def install():
         print(f"[*] Installing Windows launchers to: {target_dir}")
 
         for name in ["b2chks", "core", "chunkcore", "b3chks"]:
-            # .cmd launcher for CMD & PowerShell
             cmd_file = target_dir / f"{name}.cmd"
             with open(cmd_file, "w", encoding="utf-8") as f:
                 f.write(f'@echo off\r\n"{py_exec}" "{source_script}" %*\r\n')
 
-            # .bat launcher
             bat_file = target_dir / f"{name}.bat"
             with open(bat_file, "w", encoding="utf-8") as f:
                 f.write(f'@echo off\r\n"{py_exec}" "{source_script}" %*\r\n')
 
-            # .ps1 PowerShell script so PowerShell recognizes it as a native cmdlet/script
             ps1_file = target_dir / f"{name}.ps1"
             with open(ps1_file, "w", encoding="utf-8") as f:
                 f.write(f'& "{py_exec}" "{source_script}" $args\r\n')
 
-        # Add function to PowerShell profile to eliminate any cmdlet errors
         try:
             ps_docs = Path(user_profile) / "Documents" / "WindowsPowerShell"
             ps_profile = ps_docs / "Microsoft.PowerShell_profile.ps1"
@@ -252,7 +238,7 @@ def install():
 
     print("\n" + "=" * 60)
     print("  [+] Installation Successful!")
-    print("  Commands 'b2chks' and 'core' are ready to use globally.")
+    print("  Native-only B2CHKS is ready to use globally.")
     print("=" * 60)
 
 
