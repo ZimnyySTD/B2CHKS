@@ -55,7 +55,7 @@ def test_pure_python_crypto():
     pt = b2chks._py_aes_gcm_decrypt(key, nonce, ct, aad=aad)
     assert pt == data
 
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, b2chks.DecryptionError)):
         b2chks._py_aes_gcm_decrypt(key, nonce, ct, aad=b"wrong_aad")
 
 

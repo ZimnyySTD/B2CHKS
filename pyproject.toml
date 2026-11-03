@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "b2chks"
+version = "1.0.0"
+description = "B2CHKS: High-performance file packaging, chunking, compression, and secure distribution protocol"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "arcxan"}
+]
+dependencies = []
+
+[project.optional-dependencies]
+fast = [
+    "cryptography>=3.4",
+    "zstandard>=0.18",
+]
+
+[project.scripts]
+b2chks = "cli.main:main"
+core = "cli.main:main"
+chunkcore = "cli.main:main"
+b3chks = "cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["b2chks*", "cli*"]
