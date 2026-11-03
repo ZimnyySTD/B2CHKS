@@ -9,6 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import b2chks
+from b2chks import B2CHKS
 
 
 def test_parse_size():
@@ -55,6 +56,58 @@ def test_pure_python_crypto():
 
     with pytest.raises(ValueError):
         b2chks._py_aes_gcm_decrypt(key, nonce, ct, aad=b"wrong_aad")
+
+
+def test_anti_brute_force_scrypt_kdf():
+    salt = os.urandom(16)
+    passphrase = "UltraSecurePassword!"
+    # Derive with memory-hard scrypt
+    key_scrypt = b2chks.derive_aes_key(passphrase, salt, kdf_name="scrypt")
+    assert len(key_scrypt) == 32
+
+    # Derive with PBKDF2
+    key_pbkdf2 = b2chks.derive_aes_key(passphrase, salt, kdf_name="pbkdf2")
+    assert len(key_pbkdf2) == 32
+    # Ensure they produce distinct, non-overlapping derived keys
+    assert key_scrypt != key_pbkdf2
+
+
+def test_sdk_api_and_progress_callback(tmp_path):
+    src_file = tmp_path / "sdk_test.dat"
+    content = b"SDK embed test " * 2000
+    src_file.write_bytes(content)
+
+    progress_events = []
+
+    def on_progress(current, total, stage):
+        progress_events.append((current, total, stage))
+
+    # Test B2CHKS class methods
+    priv, pub = B2CHKS.keygen(author="sdk_dev", out_dir=str(tmp_path / "keys"))
+    dist_dir = tmp_path / "sdk_dist"
+    ext_dir = tmp_path / "sdk_ext"
+
+    manifest_path = B2CHKS.pack(
+        source=str(src_file),
+        chunk_size="4k",
+        output_dir=str(dist_dir),
+        encrypt_key="SdkPassphrase",
+        private_key=priv,
+        author="sdk_dev",
+        progress_callback=on_progress,
+    )
+
+    assert manifest_path.exists()
+    assert len(progress_events) > 0
+    assert any(stage == "chunking" for _, _, stage in progress_events)
+
+    # Verify via SDK
+    assert B2CHKS.verify(str(manifest_path), public_key=pub)
+
+    # Extract via SDK
+    ok = B2CHKS.extract(str(manifest_path), output_dir=str(ext_dir), decrypt_key="SdkPassphrase", public_key=pub)
+    assert ok
+    assert (ext_dir / "sdk_test.dat").read_bytes() == content
 
 
 def test_pack_and_extract_single_file_unencrypted(tmp_path):
@@ -124,6 +177,7 @@ def test_pack_and_extract_directory_encrypted(tmp_path):
     assert manifest["package_info"]["encrypted"] is True
     assert "encryption" in manifest
     assert manifest["encryption"]["algorithm"] == "AES-256-GCM"
+    assert manifest["encryption"]["kdf"] == "scrypt"
 
     # Verify
     assert b2chks.verify(str(manifest_path))
@@ -151,7 +205,6 @@ def test_pack_and_extract_directory_encrypted(tmp_path):
 
 
 def test_zero_dependency_mode(tmp_path, monkeypatch):
-    # Force pure-Python execution mode
     monkeypatch.setattr(b2chks, "HAVE_CRYPTOGRAPHY", False)
 
     src_file = tmp_path / "pure_data.txt"

@@ -3,10 +3,12 @@
 B2CHKS: High-performance file packaging, chunking, compression, and secure distribution protocol.
 Pure-Python zero-dependency implementation with optional cryptography acceleration.
 Cross-platform support for Linux, macOS, and Windows.
+Embeddable SDK with progress hooks and multi-threaded pipeline.
 """
 
 import argparse
 import base64
+import concurrent.futures
 import getpass
 import gzip
 import hashlib
@@ -18,9 +20,14 @@ import sys
 import tarfile
 from hashlib import sha256
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Tuple, Dict, Any, List, Callable
 
 PROTOCOL_VERSION = "b2chks"
+DEFAULT_KDF = "scrypt"
+SCRYPT_N = 16384
+SCRYPT_R = 8
+SCRYPT_P = 1
+SCRYPT_MAXMEM = 67108864
 PBKDF2_ITERATIONS = 100_000
 NONCE_SIZE = 12
 TAG_SIZE = 16
@@ -145,7 +152,6 @@ def _ed_verify(s: bytes, m: bytes, pk: bytes) -> bool:
         return False
 
 
-# Standard PKCS#8 and SubjectPublicKeyInfo ASN.1 DER fixed headers for Ed25519
 _ED25519_PKCS8_PRIV_HEADER = bytes.fromhex("302e020100300506032b657004220420")
 _ED25519_SPKI_PUB_HEADER = bytes.fromhex("302a300506032b6570032100")
 
@@ -326,9 +332,29 @@ def _py_aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext_with_tag: bytes, aa
 # Unified Cryptographic Abstractions
 # ==============================================================================
 
-def derive_aes_key(passphrase: str, salt: bytes) -> bytes:
-    """Derive 256-bit key from passphrase using PBKDF2-HMAC-SHA256 (standard library)."""
-    return hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, PBKDF2_ITERATIONS, dklen=32)
+def derive_aes_key(passphrase: str, salt: bytes, kdf_name: str = DEFAULT_KDF, kdf_params: Optional[Dict[str, Any]] = None) -> bytes:
+    """
+    Derive 256-bit key using memory-hard scrypt (anti-brute-force) or PBKDF2 fallback.
+    scrypt enforces large RAM usage per hash, preventing GPU and ASIC mass cracking.
+    """
+    pw_bytes = passphrase.encode("utf-8")
+    kdf_lower = kdf_name.lower()
+
+    if kdf_lower == "scrypt" and hasattr(hashlib, "scrypt"):
+        params = kdf_params or {}
+        n = params.get("n", SCRYPT_N)
+        r = params.get("r", SCRYPT_R)
+        p = params.get("p", SCRYPT_P)
+        maxmem = params.get("maxmem", SCRYPT_MAXMEM)
+        try:
+            return hashlib.scrypt(pw_bytes, salt=salt, n=n, r=r, p=p, maxmem=maxmem, dklen=32)
+        except Exception:
+            return hashlib.scrypt(pw_bytes, salt=salt, n=16384, r=8, p=1, maxmem=67108864, dklen=32)
+    else:
+        # PBKDF2-HMAC-SHA256 fallback
+        params = kdf_params or {}
+        iterations = params.get("iterations", PBKDF2_ITERATIONS)
+        return hashlib.pbkdf2_hmac("sha256", pw_bytes, salt, iterations, dklen=32)
 
 def encrypt_aes_gcm(key: bytes, nonce: bytes, data: bytes, aad: bytes = b"") -> bytes:
     """Encrypt using AES-256-GCM. Uses cryptography if available, else pure Python."""
@@ -383,7 +409,6 @@ def load_private_key_seed(priv_path: Path) -> Optional[bytes]:
     """Load 32-byte Ed25519 seed from private key PEM or raw bytes."""
     try:
         content = priv_path.read_bytes()
-        # If PEM
         if b"BEGIN" in content:
             der = _parse_pem(content.decode("utf-8", errors="ignore"))
             if len(der) >= 32:
@@ -484,14 +509,29 @@ def get_canonical_json_bytes(manifest_dict: Dict[str, Any]) -> bytes:
         del clean["security"]["signature"]
     return json.dumps(clean, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-def compress_source_to_stream(source_path: Path, temp_file_path: Path) -> Tuple[int, str]:
-    """Compress file or directory into temp_file_path using gzip stream."""
+def compress_source_to_stream(
+    source_path: Path,
+    temp_file_path: Path,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> Tuple[int, str]:
+    """Compress file or directory into temp_file_path using high-speed buffered streaming."""
+    buffer_size = 2 * 1024 * 1024  # 2MB buffer for optimized I/O throughput
+
     if source_path.is_file():
         source_type = "file"
         total_size = source_path.stat().st_size
-        with open(source_path, "rb") as f_in, gzip.open(temp_file_path, "wb", compresslevel=6) as f_out:
-            shutil.copyfileobj(f_in, f_out)
+        bytes_processed = 0
+        with open(source_path, "rb") as f_in, gzip.open(temp_file_path, "wb", compresslevel=4) as f_out:
+            while True:
+                buf = f_in.read(buffer_size)
+                if not buf:
+                    break
+                f_out.write(buf)
+                bytes_processed += len(buf)
+                if progress_callback:
+                    progress_callback(bytes_processed, total_size, "compressing")
         return total_size, source_type
+
     elif source_path.is_dir():
         source_type = "directory"
         total_size = 0
@@ -501,8 +541,14 @@ def compress_source_to_stream(source_path: Path, temp_file_path: Path) -> Tuple[
                 if not fp.is_symlink():
                     total_size += fp.stat().st_size
 
-        with tarfile.open(temp_file_path, "w:gz", compresslevel=6) as tar:
+        if progress_callback:
+            progress_callback(0, total_size, "compressing")
+
+        with tarfile.open(temp_file_path, "w:gz", compresslevel=4) as tar:
             tar.add(str(source_path), arcname=source_path.name)
+
+        if progress_callback:
+            progress_callback(total_size, total_size, "compressing")
         return total_size, source_type
     else:
         raise FileNotFoundError(f"Source path {source_path} does not exist")
@@ -531,6 +577,40 @@ def resolve_manifest_path(input_path: Optional[str] = None) -> Path:
 # Core Operations: Pack, Verify, Extract
 # ==============================================================================
 
+def _process_chunk_worker(
+    chunk_index: int,
+    chunk_data: bytes,
+    is_encrypted: bool,
+    aes_key: Optional[bytes],
+    out_dir: Path,
+) -> Dict[str, Any]:
+    """Worker to encrypt, write, and hash a single chunk concurrently."""
+    if is_encrypted and aes_key:
+        nonce = os.urandom(NONCE_SIZE)
+        ciphertext_with_tag = encrypt_aes_gcm(
+            aes_key,
+            nonce,
+            chunk_data,
+            aad=chunk_index.to_bytes(4, "big"),
+        )
+        file_bytes = nonce + ciphertext_with_tag
+    else:
+        file_bytes = chunk_data
+
+    chunk_filename = f"chunk_{chunk_index:03d}.bin"
+    chunk_path = out_dir / chunk_filename
+    with open(chunk_path, "wb") as cf:
+        cf.write(file_bytes)
+
+    chunk_hash = sha256(file_bytes).hexdigest()
+    return {
+        "index": chunk_index,
+        "filename": chunk_filename,
+        "size": len(file_bytes),
+        "sha256": chunk_hash,
+    }
+
+
 def pack(
     source: str,
     chunk_size_str: str,
@@ -539,6 +619,8 @@ def pack(
     private_key_path: Optional[str] = None,
     author: Optional[str] = None,
     generate_key: bool = False,
+    kdf: str = DEFAULT_KDF,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> Path:
     """Pack a file or directory into compressed, optionally encrypted chunks with manifest."""
     source_path = Path(source).resolve()
@@ -549,7 +631,6 @@ def pack(
     out_dir = Path(output_dir).resolve() if output_dir else Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Key generation request or detection
     priv_file = private_key_path
     if generate_key or (priv_file and not Path(priv_file).exists() and priv_file == "auto"):
         print(f"[*] Generating new developer Ed25519 keypair for author '{author or 'author'}'...")
@@ -563,21 +644,30 @@ def pack(
         elif Path("private.pem").exists():
             priv_file = str(Path("private.pem").resolve())
 
-    # Temporary compressed archive
     temp_archive = out_dir / f".tmp_{source_path.name}.archive"
 
     print(f"[*] Compressing source '{source_path.name}'...")
-    total_uncompressed_size, source_type = compress_source_to_stream(source_path, temp_archive)
+    total_uncompressed_size, source_type = compress_source_to_stream(source_path, temp_archive, progress_callback)
     compressed_size = temp_archive.stat().st_size
     print(f"[*] Compressed {total_uncompressed_size} bytes -> {compressed_size} bytes.")
 
     is_encrypted = bool(encrypt_key)
     salt_hex = None
     aes_key = None
+    kdf_params = {}
+    chosen_kdf = kdf
+
     if is_encrypted:
         salt = os.urandom(16)
         salt_hex = salt.hex()
-        aes_key = derive_aes_key(encrypt_key, salt)
+        if chosen_kdf == "scrypt" and hasattr(hashlib, "scrypt"):
+            kdf_params = {"n": SCRYPT_N, "r": SCRYPT_R, "p": SCRYPT_P}
+            aes_key = derive_aes_key(encrypt_key, salt, "scrypt", kdf_params)
+        else:
+            chosen_kdf = "PBKDF2-HMAC-SHA256"
+            kdf_params = {"iterations": PBKDF2_ITERATIONS}
+            aes_key = derive_aes_key(encrypt_key, salt, "PBKDF2-HMAC-SHA256", kdf_params)
+
         if chunk_size > (NONCE_SIZE + TAG_SIZE):
             read_chunk_size = chunk_size - (NONCE_SIZE + TAG_SIZE)
         else:
@@ -585,47 +675,45 @@ def pack(
     else:
         read_chunk_size = chunk_size
 
+    # Concurrently process chunks using ThreadPoolExecutor for high throughput
     chunks_meta = []
-    chunk_index = 0
+    chunk_tasks = []
+    max_workers = min(32, (os.cpu_count() or 4) + 4)
 
     print(f"[*] Splitting into chunks of target size {chunk_size} bytes...")
-    with open(temp_archive, "rb") as src_f:
-        while True:
-            chunk_data = src_f.read(read_chunk_size)
-            if not chunk_data:
-                if chunk_index == 0:
-                    chunk_data = b""
-                else:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        chunk_index = 0
+        with open(temp_archive, "rb") as src_f:
+            while True:
+                chunk_data = src_f.read(read_chunk_size)
+                if not chunk_data:
+                    if chunk_index == 0:
+                        chunk_data = b""
+                    else:
+                        break
+
+                fut = executor.submit(
+                    _process_chunk_worker,
+                    chunk_index,
+                    chunk_data,
+                    is_encrypted,
+                    aes_key,
+                    out_dir,
+                )
+                chunk_tasks.append(fut)
+                chunk_index += 1
+
+                if not chunk_data:
                     break
 
-            if is_encrypted:
-                nonce = os.urandom(NONCE_SIZE)
-                ciphertext_with_tag = encrypt_aes_gcm(
-                    aes_key,
-                    nonce,
-                    chunk_data,
-                    aad=chunk_index.to_bytes(4, "big"),
-                )
-                file_bytes = nonce + ciphertext_with_tag
-            else:
-                file_bytes = chunk_data
+        for i, fut in enumerate(chunk_tasks):
+            meta = fut.result()
+            chunks_meta.append(meta)
+            if progress_callback:
+                progress_callback(i + 1, len(chunk_tasks), "chunking")
 
-            chunk_filename = f"chunk_{chunk_index:03d}.bin"
-            chunk_path = out_dir / chunk_filename
-            with open(chunk_path, "wb") as cf:
-                cf.write(file_bytes)
-
-            chunk_hash = sha256(file_bytes).hexdigest()
-            chunks_meta.append({
-                "index": chunk_index,
-                "filename": chunk_filename,
-                "size": len(file_bytes),
-                "sha256": chunk_hash,
-            })
-
-            chunk_index += 1
-            if not chunk_data:
-                break
+    # Sort chunks in strict index order
+    chunks_meta.sort(key=lambda x: x["index"])
 
     if temp_archive.exists():
         temp_archive.unlink()
@@ -653,9 +741,9 @@ def pack(
     if is_encrypted:
         manifest["encryption"] = {
             "algorithm": "AES-256-GCM",
-            "kdf": "PBKDF2-HMAC-SHA256",
-            "iterations": PBKDF2_ITERATIONS,
+            "kdf": chosen_kdf,
             "salt": salt_hex,
+            **kdf_params,
         }
 
     # Sign manifest if private key is available
@@ -690,6 +778,7 @@ def verify(
     manifest_path: Optional[str] = None,
     chunks_dir: Optional[str] = None,
     public_key_path: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> bool:
     """Verify chunk inventory, SHA-256 hashes, and Ed25519 author signature."""
     mpath = resolve_manifest_path(manifest_path)
@@ -705,7 +794,6 @@ def verify(
     print(f"[*] Verifying package '{manifest.get('package_info', {}).get('name', 'unknown')}'...")
     print(f"[*] Manifest protocol: {manifest.get('protocol')}")
 
-    # 1. Verify Ed25519 signature if present
     sec = manifest.get("security", {})
     signature_hex = sec.get("signature")
     pub_key_hex = sec.get("public_key")
@@ -722,7 +810,6 @@ def verify(
     else:
         print("[*] Manifest is unsigned.")
 
-    # 2. Verify chunks inventory and integrity
     chunks = manifest.get("chunks", [])
     if not chunks:
         print("[-] Error: Manifest contains no chunk definitions.")
@@ -739,10 +826,13 @@ def verify(
     missing_chunks = []
     corrupted_chunks = []
 
-    for chunk_info in sorted(chunks, key=lambda x: x["index"]):
+    for i, chunk_info in enumerate(sorted(chunks, key=lambda x: x["index"])):
         idx = chunk_info["index"]
         expected_hash = chunk_info["sha256"]
         expected_name = chunk_info.get("filename", f"chunk_{idx:03d}.bin")
+
+        if progress_callback:
+            progress_callback(i + 1, len(chunks), "verifying")
 
         cf_path = c_dir / expected_name
         if cf_path.exists():
@@ -779,12 +869,35 @@ def verify(
         return False
 
 
+def _decrypt_chunk_worker(
+    idx: int,
+    raw_chunk: bytes,
+    is_encrypted: bool,
+    aes_key: Optional[bytes],
+) -> Tuple[int, bytes]:
+    """Worker to decrypt a single chunk."""
+    if is_encrypted and aes_key:
+        if len(raw_chunk) < (NONCE_SIZE + TAG_SIZE):
+            raise ValueError(f"Corrupt encrypted chunk {idx}: file too small")
+        nonce = raw_chunk[:NONCE_SIZE]
+        ciphertext_with_tag = raw_chunk[NONCE_SIZE:]
+        decrypted_data = decrypt_aes_gcm(
+            aes_key,
+            nonce,
+            ciphertext_with_tag,
+            aad=idx.to_bytes(4, "big"),
+        )
+        return idx, decrypted_data
+    return idx, raw_chunk
+
+
 def extract(
     manifest_path: Optional[str] = None,
     chunks_dir: Optional[str] = None,
     output_dir: Optional[str] = None,
     decrypt_key: Optional[str] = None,
     public_key_path: Optional[str] = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> bool:
     """Verify chunks, decrypt (if needed), reassemble, and decompress in one go."""
     mpath = resolve_manifest_path(manifest_path)
@@ -798,7 +911,7 @@ def extract(
     c_dir = Path(chunks_dir).resolve() if chunks_dir else mpath.parent
 
     print("[*] Running pre-flight verification...")
-    if not verify(str(mpath), str(c_dir), public_key_path):
+    if not verify(str(mpath), str(c_dir), public_key_path, progress_callback):
         print("[-] Pre-flight verification failed. Aborting extraction.")
         return False
 
@@ -833,7 +946,8 @@ def extract(
             print("[-] Decryption key is required.")
             return False
 
-        aes_key = derive_aes_key(passphrase, salt)
+        kdf_name = enc_info.get("kdf", DEFAULT_KDF)
+        aes_key = derive_aes_key(passphrase, salt, kdf_name, enc_info)
 
     chunks = sorted(manifest.get("chunks", []), key=lambda x: x["index"])
 
@@ -848,45 +962,45 @@ def extract(
     out_base.mkdir(parents=True, exist_ok=True)
 
     temp_reassembled = out_base / f".tmp_{target_name}.archive"
-    print(f"[*] Reassembling {len(chunks)} chunks...")
+    print(f"[*] Reassembling and decrypting {len(chunks)} chunks...")
 
     try:
-        with open(temp_reassembled, "wb") as out_f:
-            for chunk_info in chunks:
-                idx = chunk_info["index"]
-                expected_hash = chunk_info["sha256"]
-                expected_name = chunk_info.get("filename")
+        max_workers = min(32, (os.cpu_count() or 4) + 4)
+        raw_chunks = []
+        for chunk_info in chunks:
+            idx = chunk_info["index"]
+            expected_hash = chunk_info["sha256"]
+            expected_name = chunk_info.get("filename")
 
-                cf_path = c_dir / expected_name if expected_name else None
-                if not (cf_path and cf_path.exists() and sha256(cf_path.read_bytes()).hexdigest() == expected_hash):
-                    cf_path = hash_to_path.get(expected_hash)
+            cf_path = c_dir / expected_name if expected_name else None
+            if not (cf_path and cf_path.exists() and sha256(cf_path.read_bytes()).hexdigest() == expected_hash):
+                cf_path = hash_to_path.get(expected_hash)
 
-                if not cf_path or not cf_path.exists():
-                    print(f"[-] Could not find chunk file for index {idx} (hash {expected_hash})")
+            if not cf_path or not cf_path.exists():
+                print(f"[-] Could not find chunk file for index {idx} (hash {expected_hash})")
+                return False
+
+            raw_chunks.append((idx, cf_path.read_bytes()))
+
+        decrypted_map: Dict[int, bytes] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(_decrypt_chunk_worker, idx, raw_chunk, is_encrypted, aes_key)
+                for idx, raw_chunk in raw_chunks
+            ]
+            for i, fut in enumerate(futures):
+                try:
+                    idx, chunk_bytes = fut.result()
+                    decrypted_map[idx] = chunk_bytes
+                    if progress_callback:
+                        progress_callback(i + 1, len(futures), "decrypting")
+                except Exception:
+                    print("[-] Cryptographic authentication layer rejected decryption key or corrupted data.")
                     return False
 
-                with open(cf_path, "rb") as cf:
-                    raw_chunk = cf.read()
-
-                if is_encrypted:
-                    if len(raw_chunk) < (NONCE_SIZE + TAG_SIZE):
-                        print(f"[-] Corrupt encrypted chunk {idx}: file too small")
-                        return False
-                    nonce = raw_chunk[:NONCE_SIZE]
-                    ciphertext_with_tag = raw_chunk[NONCE_SIZE:]
-                    try:
-                        decrypted_data = decrypt_aes_gcm(
-                            aes_key,
-                            nonce,
-                            ciphertext_with_tag,
-                            aad=idx.to_bytes(4, "big"),
-                        )
-                    except Exception:
-                        print("[-] Cryptographic authentication layer rejected decryption key or corrupted data.")
-                        return False
-                    out_f.write(decrypted_data)
-                else:
-                    out_f.write(raw_chunk)
+        with open(temp_reassembled, "wb") as out_f:
+            for idx in range(len(chunks)):
+                out_f.write(decrypted_map[idx])
 
         print(f"[*] Decompressing and reconstructing '{target_name}' (type: {source_type})...")
         destination_path = out_base / target_name
@@ -913,6 +1027,81 @@ def extract(
 
 
 # ==============================================================================
+# Embeddable SDK Class for Application Developers
+# ==============================================================================
+
+class B2CHKS:
+    """
+    High-level embeddable SDK for integrating B2CHKS into desktop applications,
+    web APIs, GUI interfaces, or automated pipelines.
+    """
+
+    @staticmethod
+    def keygen(author: str = "author", out_dir: str = ".") -> Tuple[str, str]:
+        """Generate Ed25519 signing keypair."""
+        return generate_keypair(author=author, out_dir=out_dir)
+
+    @staticmethod
+    def pack(
+        source: str,
+        chunk_size: str,
+        output_dir: Optional[str] = None,
+        encrypt_key: Optional[str] = None,
+        private_key: Optional[str] = None,
+        author: Optional[str] = None,
+        generate_key: bool = False,
+        kdf: str = DEFAULT_KDF,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Path:
+        """Compress, chunk, encrypt, and sign source."""
+        return pack(
+            source=source,
+            chunk_size_str=chunk_size,
+            output_dir=output_dir,
+            encrypt_key=encrypt_key,
+            private_key_path=private_key,
+            author=author,
+            generate_key=generate_key,
+            kdf=kdf,
+            progress_callback=progress_callback,
+        )
+
+    @staticmethod
+    def verify(
+        manifest: Optional[str] = None,
+        chunks_dir: Optional[str] = None,
+        public_key: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> bool:
+        """Verify chunk hashes, inventory, and manifest signature."""
+        return verify(
+            manifest_path=manifest,
+            chunks_dir=chunks_dir,
+            public_key_path=public_key,
+            progress_callback=progress_callback,
+        )
+
+    @staticmethod
+    def extract(
+        manifest: Optional[str] = None,
+        chunks_dir: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        decrypt_key: Optional[str] = None,
+        public_key: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> bool:
+        """Verify, decrypt, assemble, and decompress package."""
+        return extract(
+            manifest_path=manifest,
+            chunks_dir=chunks_dir,
+            output_dir=output_dir,
+            decrypt_key=decrypt_key,
+            public_key_path=public_key,
+            progress_callback=progress_callback,
+        )
+
+
+# ==============================================================================
 # CLI Entry Point & Parameter Parsing
 # ==============================================================================
 
@@ -920,7 +1109,6 @@ def main(custom_argv: Optional[List[str]] = None):
     raw_argv = list(sys.argv[1:]) if custom_argv is None else list(custom_argv)
     prog_name = Path(sys.argv[0]).name
 
-    # Check if invoked via script name ending in 'keygen' (e.g. core.pykeygen, b2chks.pykeygen)
     if "keygen" in prog_name and ("keygen" not in raw_argv) and ("-h" not in raw_argv) and ("--help" not in raw_argv):
         raw_argv.insert(0, "keygen")
 
@@ -930,13 +1118,11 @@ def main(custom_argv: Optional[List[str]] = None):
     )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
-    # Keygen subcommand
     for sub in ["keygen", "key-gen", "genkey"]:
         parser_keygen = subparsers.add_parser(sub, help="Generate Ed25519 signing keypair")
         parser_keygen.add_argument("--author", "-a", type=str, default="author", help="Author/developer identifier")
         parser_keygen.add_argument("--out-dir", "-o", type=str, default=".", help="Output directory for keys")
 
-    # Pack subcommand
     for name in ["pack", "package", "compress"]:
         parser_pack = subparsers.add_parser(name, help="Compress, chunk, encrypt and sign a file or directory")
         parser_pack.add_argument("source", type=str, help="Path to file or directory to pack")
@@ -948,19 +1134,18 @@ def main(custom_argv: Optional[List[str]] = None):
             help="Size of each chunk (e.g. 100m, 500m, 1g, 500k). Required.",
         )
         parser_pack.add_argument("--encrypt-key", "--encrypt_key", "-e", dest="encrypt_key", type=str, default=None, help="Passphrase to encrypt chunks with AES-256-GCM")
+        parser_pack.add_argument("--kdf", type=str, choices=["scrypt", "pbkdf2"], default="scrypt", help="Key derivation function (default: scrypt anti-brute-force)")
         parser_pack.add_argument("--private-key", "--private_key", "-k", "--key", dest="private_key", type=str, default=None, help="Path to Ed25519 private.pem to sign manifest")
         parser_pack.add_argument("--author", "-a", type=str, default=None, help="Author/Developer ID for manifest")
         parser_pack.add_argument("--output-dir", "--output_dir", "-o", dest="output_dir", type=str, default=None, help="Output directory for chunks and manifest (defaults to current dir)")
         parser_pack.add_argument("--keygen", "--generate-key", dest="generate_key", action="store_true", help="Automatically generate keypair if none exists and sign package")
 
-    # Verify subcommand
     for name in ["verify", "check"]:
         parser_verify = subparsers.add_parser(name, help="Verify chunk integrity and author signature")
         parser_verify.add_argument("manifest", type=str, nargs="?", default=None, help="Path to manifest.json or directory containing it")
         parser_verify.add_argument("--chunks-dir", "--chunks_dir", "-d", dest="chunks_dir", type=str, default=None, help="Directory containing chunk files")
         parser_verify.add_argument("--public-key", "--public_key", "-k", dest="public_key", type=str, default=None, help="Path to Ed25519 public.pem to verify signature")
 
-    # Extract subcommand
     for name in ["extract", "unpack", "decompress"]:
         parser_extract = subparsers.add_parser(name, help="Verify, decrypt, assemble, and decompress package")
         parser_extract.add_argument("manifest", type=str, nargs="?", default=None, help="Path to manifest.json or directory containing it")
@@ -991,6 +1176,7 @@ def main(custom_argv: Optional[List[str]] = None):
                 private_key_path=args.private_key,
                 author=args.author,
                 generate_key=args.generate_key,
+                kdf=args.kdf,
             )
 
         elif args.command in ["verify", "check"]:
