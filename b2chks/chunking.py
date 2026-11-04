@@ -1,8 +1,32 @@
-"""Chunk parsing, streaming, and metadata management."""
+"""Chunk parsing, streaming, and byte-budgeted memory management."""
+import threading
 from pathlib import Path
 from typing import Dict, Any
 
-from b2chks.exceptions import ChunkError
+class ByteBudget:
+    """
+    Thread-safe byte budget tracker to prevent memory exhaustion
+    by bounding the total unwritten/inflight chunk bytes in memory.
+    """
+    def __init__(self, max_bytes: int):
+        self.max_bytes = max(1024 * 1024, max_bytes)
+        self.current_bytes = 0
+        self.lock = threading.Lock()
+        self.condition = threading.Condition(self.lock)
+
+    def acquire(self, nbytes: int):
+        """Block until nbytes can be budgeted within max_bytes."""
+        with self.condition:
+            while self.current_bytes + nbytes > self.max_bytes and self.current_bytes > 0:
+                self.condition.wait()
+            self.current_bytes += nbytes
+
+    def release(self, nbytes: int):
+        """Release budgeted bytes and notify waiting threads."""
+        with self.condition:
+            self.current_bytes = max(0, self.current_bytes - nbytes)
+            self.condition.notify_all()
+
 
 def parse_size(size_str: str) -> int:
     """Parse size string with multipliers (b, k, m, g, t) into integer bytes."""
