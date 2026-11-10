@@ -51,7 +51,6 @@ def _process_chunk_worker(
         with open(chunk_path, "wb") as cf:
             cf.write(file_bytes)
 
-        # Hash with incremental update
         h = hashlib.sha256()
         h.update(file_bytes)
         chunk_hash = h.hexdigest()
@@ -69,7 +68,8 @@ def _process_chunk_worker(
 
 def pack(
     source: str,
-    chunk_size_str: str,
+    chunk_size_str: Optional[str] = None,
+    nochunks: bool = False,
     output_dir: Optional[str] = None,
     encrypt_key: Optional[str] = None,
     private_key_path: Optional[str] = None,
@@ -82,12 +82,14 @@ def pack(
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     cancel_token: Optional[Callable[[], bool]] = None,
 ) -> Path:
-    """Pack a file or directory into compressed, optionally encrypted chunks with manifest."""
+    """
+    Pack a file or directory into compressed, optionally encrypted package with manifest.
+    If nochunks=True, packs directly into a single chunk without splitting.
+    """
     source_path = Path(source).resolve()
     if not source_path.exists():
         raise FileNotFoundError(f"Source {source} does not exist.")
 
-    chunk_size = parse_size(chunk_size_str)
     out_dir = Path(output_dir).resolve() if output_dir else Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -103,28 +105,7 @@ def pack(
         elif Path("private.pem").exists():
             priv_file = str(Path("private.pem").resolve())
 
-    temp_archive = out_dir / f".tmp_{source_path.name}.archive"
-
-    # 1. Compress source
-    total_uncompressed_size, source_type = compress_stream(
-        source_path,
-        temp_archive,
-        algorithm=compression,
-        compress_level=1,
-        progress_callback=progress_callback,
-    )
-
-    # Determine actual compression algorithm used
-    actual_compression = compression.lower()
-    from b2chks.backends import HAVE_ZSTANDARD
-    if actual_compression == "zstd" and not HAVE_ZSTANDARD:
-        actual_compression = "gzip"
-
-    if cancel_token and cancel_token():
-        if temp_archive.exists():
-            temp_archive.unlink()
-        raise CancelledError("Packing cancelled by user")
-
+    # Direct single-pass compression for nochunks
     is_encrypted = bool(encrypt_key)
     salt_hex = None
     cipher = None
@@ -144,87 +125,143 @@ def pack(
 
         cipher = get_aes_gcm_cipher(aes_key)
 
-        if chunk_size > (NONCE_SIZE + TAG_SIZE):
-            read_chunk_size = chunk_size - (NONCE_SIZE + TAG_SIZE)
-        else:
-            read_chunk_size = chunk_size
-    else:
-        read_chunk_size = chunk_size
+    temp_archive = out_dir / f".tmp_{source_path.name}.archive"
 
-    # Conservative worker defaults (max 8 workers to prevent CPU/storage thrashing)
-    max_workers = workers if workers and workers > 0 else min(os.cpu_count() or 4, 8)
-    budget_limit = memory_budget_bytes or max(MAX_MEMORY_BUDGET, chunk_size * 2)
-    byte_budget = ByteBudget(budget_limit)
+    # 1. Compress source stream
+    total_uncompressed_size, source_type = compress_stream(
+        source_path,
+        temp_archive,
+        algorithm=compression,
+        compress_level=1,
+        progress_callback=progress_callback,
+    )
+
+    from b2chks.backends import HAVE_ZSTANDARD
+    actual_compression = compression.lower()
+    if actual_compression == "zstd" and not HAVE_ZSTANDARD:
+        actual_compression = "gzip"
+
+    if cancel_token and cancel_token():
+        if temp_archive.exists():
+            temp_archive.unlink()
+        raise CancelledError("Packing cancelled by user")
+
     chunks_meta = []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        chunk_index = 0
-        in_flight = {}
-        with open(temp_archive, "rb", buffering=4*1024*1024) as src_f:
-            while True:
-                if cancel_token and cancel_token():
-                    if temp_archive.exists():
-                        temp_archive.unlink()
-                    raise CancelledError("Packing cancelled by user")
+    # Handle nochunks mode
+    if nochunks:
+        compressed_bytes = temp_archive.read_bytes()
+        temp_archive.unlink()
 
-                # Acquire budget for the upcoming chunk before reading
-                byte_budget.acquire(read_chunk_size)
+        if is_encrypted and cipher:
+            nonce = os.urandom(NONCE_SIZE)
+            ciphertext = cipher.encrypt(nonce, compressed_bytes, associated_data=(0).to_bytes(4, "big"))
+            chunk_bytes = nonce + ciphertext
+        else:
+            chunk_bytes = compressed_bytes
 
-                chunk_data = src_f.read(read_chunk_size)
-                if not chunk_data:
-                    byte_budget.release(read_chunk_size)
-                    if chunk_index == 0:
-                        chunk_data = b""
-                        byte_budget.acquire(1)
-                    else:
+        chunk_filename = "chunk_000.bin"
+        chunk_path = out_dir / chunk_filename
+        chunk_path.write_bytes(chunk_bytes)
+
+        h = hashlib.sha256()
+        h.update(chunk_bytes)
+        chunk_hash = h.hexdigest()
+
+        chunks_meta.append({
+            "index": 0,
+            "filename": chunk_filename,
+            "size": len(chunk_bytes),
+            "sha256": chunk_hash,
+        })
+        effective_chunk_size = len(chunk_bytes)
+
+    else:
+        # Standard chunking mode
+        if not chunk_size_str:
+            raise ValueError("chunk_size is required unless nochunks=True")
+
+        chunk_size = parse_size(chunk_size_str)
+        effective_chunk_size = chunk_size
+
+        if is_encrypted:
+            if chunk_size > (NONCE_SIZE + TAG_SIZE):
+                read_chunk_size = chunk_size - (NONCE_SIZE + TAG_SIZE)
+            else:
+                read_chunk_size = chunk_size
+        else:
+            read_chunk_size = chunk_size
+
+        max_workers = workers if workers and workers > 0 else min(os.cpu_count() or 4, 8)
+        budget_limit = memory_budget_bytes or max(MAX_MEMORY_BUDGET, chunk_size * 2)
+        byte_budget = ByteBudget(budget_limit)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            chunk_index = 0
+            in_flight = {}
+            with open(temp_archive, "rb", buffering=4*1024*1024) as src_f:
+                while True:
+                    if cancel_token and cancel_token():
+                        if temp_archive.exists():
+                            temp_archive.unlink()
+                        raise CancelledError("Packing cancelled by user")
+
+                    byte_budget.acquire(read_chunk_size)
+                    chunk_data = src_f.read(read_chunk_size)
+                    if not chunk_data:
+                        byte_budget.release(read_chunk_size)
+                        if chunk_index == 0:
+                            chunk_data = b""
+                            byte_budget.acquire(1)
+                        else:
+                            break
+
+                    fut = executor.submit(
+                        _process_chunk_worker,
+                        chunk_index,
+                        chunk_data,
+                        is_encrypted,
+                        cipher,
+                        out_dir,
+                        byte_budget,
+                    )
+                    in_flight[fut] = chunk_index
+                    chunk_index += 1
+
+                    done = [f for f in in_flight.keys() if f.done()]
+                    for d in done:
+                        meta = d.result()
+                        chunks_meta.append(meta)
+                        del in_flight[d]
+                        if progress_callback:
+                            progress_callback(len(chunks_meta), chunk_index, "chunking")
+
+                    if not chunk_data:
                         break
 
-                fut = executor.submit(
-                    _process_chunk_worker,
-                    chunk_index,
-                    chunk_data,
-                    is_encrypted,
-                    cipher,
-                    out_dir,
-                    byte_budget,
-                )
-                in_flight[fut] = chunk_index
-                chunk_index += 1
+                while in_flight:
+                    done, _ = concurrent.futures.wait(in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
+                    for d in done:
+                        meta = d.result()
+                        chunks_meta.append(meta)
+                        del in_flight[d]
+                        if progress_callback:
+                            progress_callback(len(chunks_meta), chunk_index, "chunking")
 
-                # Poll completed tasks
-                done = [f for f in in_flight.keys() if f.done()]
-                for d in done:
-                    meta = d.result()
-                    chunks_meta.append(meta)
-                    del in_flight[d]
-                    if progress_callback:
-                        progress_callback(len(chunks_meta), chunk_index, "chunking")
+        chunks_meta.sort(key=lambda x: x["index"])
 
-                if not chunk_data:
-                    break
-
-            while in_flight:
-                done, _ = concurrent.futures.wait(in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
-                for d in done:
-                    meta = d.result()
-                    chunks_meta.append(meta)
-                    del in_flight[d]
-                    if progress_callback:
-                        progress_callback(len(chunks_meta), chunk_index, "chunking")
-
-    chunks_meta.sort(key=lambda x: x["index"])
-
-    if temp_archive.exists():
-        temp_archive.unlink()
+        if temp_archive.exists():
+            temp_archive.unlink()
 
     package_info: Dict[str, Any] = {
         "name": source_path.name,
         "source_type": source_type,
         "total_size_bytes": total_uncompressed_size,
-        "chunk_size_bytes": chunk_size,
+        "chunk_size_bytes": effective_chunk_size,
         "total_chunks": len(chunks_meta),
         "encrypted": is_encrypted,
         "compression": actual_compression,
+        "nochunks": nochunks,
     }
 
     manifest: Dict[str, Any] = {

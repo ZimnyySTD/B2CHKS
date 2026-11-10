@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Command Line Interface (CLI) for B2CHKS."""
+"""Clean, simple Command Line Interface (CLI) for B2CHKS."""
 import argparse
 import sys
 from pathlib import Path
@@ -25,48 +25,54 @@ def main(custom_argv: Optional[List[str]] = None):
     )
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
-    for sub in ["keygen", "key-gen", "genkey"]:
-        parser_keygen = subparsers.add_parser(sub, help="Generate Ed25519 signing keypair")
-        parser_keygen.add_argument("--author", "-a", type=str, default="author", help="Author/developer identifier")
-        parser_keygen.add_argument("--out-dir", "-o", type=str, default=".", help="Output directory for keys")
+    # 1. keygen
+    parser_keygen = subparsers.add_parser("keygen", help="Generate Ed25519 signing keypair")
+    parser_keygen.add_argument("--author", "-a", type=str, default="author", help="Author/developer identifier")
+    parser_keygen.add_argument("--out-dir", "-o", type=str, default=".", help="Output directory for keys")
 
-    for name in ["pack", "package", "compress"]:
-        parser_pack = subparsers.add_parser(name, help="Compress, chunk, encrypt and sign a file or directory")
-        parser_pack.add_argument("source", type=str, help="Path to file or directory to pack")
-        parser_pack.add_argument(
-            "--chunk-size", "--chunk_size", "-c", "--size",
-            dest="chunk_size",
-            type=str,
-            required=True,
-            help="Size of each chunk (e.g. 100m, 500m, 1g, 500k). Required.",
-        )
-        parser_pack.add_argument("--encrypt-key", "--encrypt_key", "-e", dest="encrypt_key", type=str, default=None, help="Passphrase to encrypt chunks with AES-256-GCM")
-        parser_pack.add_argument("--kdf", type=str, choices=["scrypt", "pbkdf2"], default="scrypt", help="Key derivation function (default: scrypt anti-brute-force)")
-        parser_pack.add_argument("--compression", type=str, choices=["gzip", "zstd"], default="gzip", help="Compression algorithm (default: gzip, optional: zstd)")
-        parser_pack.add_argument("--private-key", "--private_key", "-k", "--key", dest="private_key", type=str, default=None, help="Path to Ed25519 private.pem to sign manifest")
-        parser_pack.add_argument("--author", "-a", type=str, default=None, help="Author/Developer ID for manifest")
-        parser_pack.add_argument("--output-dir", "--output_dir", "-o", dest="output_dir", type=str, default=None, help="Output directory for chunks and manifest (defaults to current dir)")
-        parser_pack.add_argument("--workers", "-w", type=int, default=None, help="Number of worker threads (default: auto)")
-        parser_pack.add_argument("--keygen", "--generate-key", dest="generate_key", action="store_true", help="Automatically generate keypair if none exists and sign package")
+    # 2. pack
+    parser_pack = subparsers.add_parser("pack", help="Compress, pack, optionally chunk, encrypt and sign")
+    parser_pack.add_argument("source", type=str, help="Path to file or directory to pack")
+    parser_pack.add_argument(
+        "--chunk-size", "-c",
+        dest="chunk_size",
+        type=str,
+        default=None,
+        help="Size of each chunk (e.g. 100m, 500m, 1g, 500k). Required unless --nochunks is used.",
+    )
+    parser_pack.add_argument(
+        "--nochunks", "--no-chunks",
+        dest="nochunks",
+        action="store_true",
+        help="Compress directly into a single package file without chunking",
+    )
+    parser_pack.add_argument("--encrypt-key", "-e", dest="encrypt_key", type=str, default=None, help="Passphrase to encrypt with AES-256-GCM")
+    parser_pack.add_argument("--kdf", type=str, choices=["scrypt", "pbkdf2"], default="scrypt", help="Key derivation function (default: scrypt)")
+    parser_pack.add_argument("--compression", type=str, choices=["gzip", "zstd"], default="gzip", help="Compression algorithm (default: gzip, optional: zstd)")
+    parser_pack.add_argument("--private-key", "-k", dest="private_key", type=str, default=None, help="Path to Ed25519 private.pem to sign manifest")
+    parser_pack.add_argument("--author", "-a", type=str, default=None, help="Author/Developer ID for manifest")
+    parser_pack.add_argument("--output-dir", "-o", dest="output_dir", type=str, default=None, help="Output directory for package and manifest")
+    parser_pack.add_argument("--workers", "-w", type=int, default=None, help="Number of worker threads (default: auto)")
+    parser_pack.add_argument("--keygen", dest="generate_key", action="store_true", help="Automatically generate keypair if none exists and sign")
 
-    for name in ["verify", "check"]:
-        parser_verify = subparsers.add_parser(name, help="Verify chunk integrity and author signature")
-        parser_verify.add_argument("manifest", type=str, nargs="?", default=None, help="Path to manifest.json or directory containing it")
-        parser_verify.add_argument("--chunks-dir", "--chunks_dir", "-d", dest="chunks_dir", type=str, default=None, help="Directory containing chunk files")
-        parser_verify.add_argument("--public-key", "--public_key", "-k", dest="public_key", type=str, default=None, help="Path to Ed25519 public.pem to verify signature")
-        parser_verify.add_argument("--workers", "-w", type=int, default=None, help="Number of worker threads (default: auto)")
+    # 3. verify
+    parser_verify = subparsers.add_parser("verify", help="Verify package integrity and author signature")
+    parser_verify.add_argument("manifest", type=str, nargs="?", default=None, help="Path to manifest.json or directory containing it")
+    parser_verify.add_argument("--chunks-dir", "-d", dest="chunks_dir", type=str, default=None, help="Directory containing chunk files")
+    parser_verify.add_argument("--public-key", "-k", dest="public_key", type=str, default=None, help="Path to Ed25519 public.pem to verify signature")
+    parser_verify.add_argument("--workers", "-w", type=int, default=None, help="Number of worker threads (default: auto)")
 
-    for name in ["extract", "unpack", "decompress"]:
-        parser_extract = subparsers.add_parser(name, help="Verify, decrypt, assemble, and decompress package")
-        parser_extract.add_argument("manifest", type=str, nargs="?", default=None, help="Path to manifest.json or directory containing it")
-        parser_extract.add_argument("--chunks-dir", "--chunks_dir", "-d", dest="chunks_dir", type=str, default=None, help="Directory containing chunk files")
-        parser_extract.add_argument("--output-dir", "--output_dir", "-o", dest="output_dir", type=str, default=None, help="Destination directory for extracted files")
-        parser_extract.add_argument("--decrypt-key", "--decrypt_key", "-e", dest="decrypt_key", type=str, default=None, help="Decryption key passphrase (prompts if omitted and encrypted)")
-        parser_extract.add_argument("--public-key", "--public_key", "-k", dest="public_key", type=str, default=None, help="Path to Ed25519 public.pem to verify signature")
-        parser_extract.add_argument("--workers", "-w", type=int, default=None, help="Number of worker threads (default: auto)")
+    # 4. extract
+    parser_extract = subparsers.add_parser("extract", help="Verify, decrypt, assemble, and decompress package in one go")
+    parser_extract.add_argument("manifest", type=str, nargs="?", default=None, help="Path to manifest.json or directory containing it")
+    parser_extract.add_argument("--chunks-dir", "-d", dest="chunks_dir", type=str, default=None, help="Directory containing chunk files")
+    parser_extract.add_argument("--output-dir", "-o", dest="output_dir", type=str, default=None, help="Destination directory for extracted files")
+    parser_extract.add_argument("--decrypt-key", "-e", dest="decrypt_key", type=str, default=None, help="Decryption key passphrase (prompts if omitted and encrypted)")
+    parser_extract.add_argument("--public-key", "-k", dest="public_key", type=str, default=None, help="Path to Ed25519 public.pem to verify signature")
+    parser_extract.add_argument("--workers", "-w", type=int, default=None, help="Number of worker threads (default: auto)")
 
-    for name in ["uninstall", "remove"]:
-        subparsers.add_parser(name, help="Uninstall B2CHKS globally from system")
+    # 5. uninstall
+    subparsers.add_parser("uninstall", help="Uninstall B2CHKS globally from system")
 
     args = parser.parse_args(raw_argv)
 
@@ -75,16 +81,21 @@ def main(custom_argv: Optional[List[str]] = None):
         sys.exit(1)
 
     try:
-        if args.command in ["keygen", "key-gen", "genkey"]:
+        if args.command == "keygen":
             priv, pub = generate_keypair(args.author, args.out_dir)
             print(f"[+] Generated Ed25519 keypair for author '{args.author}':")
             print(f"    Private key: {priv}")
             print(f"    Public key:  {pub}")
 
-        elif args.command in ["pack", "package", "compress"]:
+        elif args.command == "pack":
+            if not args.nochunks and not args.chunk_size:
+                print("[-] Error: --chunk-size (-c) is required unless --nochunks is specified.", file=sys.stderr)
+                sys.exit(1)
+
             pack(
                 source=args.source,
                 chunk_size_str=args.chunk_size,
+                nochunks=args.nochunks,
                 output_dir=args.output_dir,
                 encrypt_key=args.encrypt_key,
                 private_key_path=args.private_key,
@@ -95,7 +106,7 @@ def main(custom_argv: Optional[List[str]] = None):
                 workers=args.workers,
             )
 
-        elif args.command in ["verify", "check"]:
+        elif args.command == "verify":
             ok = verify(
                 manifest_path=args.manifest,
                 chunks_dir=args.chunks_dir,
@@ -105,7 +116,7 @@ def main(custom_argv: Optional[List[str]] = None):
             if not ok:
                 sys.exit(1)
 
-        elif args.command in ["extract", "unpack", "decompress"]:
+        elif args.command == "extract":
             ok = extract(
                 manifest_path=args.manifest,
                 chunks_dir=args.chunks_dir,
@@ -117,7 +128,7 @@ def main(custom_argv: Optional[List[str]] = None):
             if not ok:
                 sys.exit(1)
 
-        elif args.command in ["uninstall", "remove"]:
+        elif args.command == "uninstall":
             try:
                 import install
             except ImportError:
