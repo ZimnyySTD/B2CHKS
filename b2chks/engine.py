@@ -43,7 +43,8 @@ class B2CHKS:
     @staticmethod
     def pack(
         source: Union[str, Path],
-        chunk_size: str = "500m",
+        chunk_size: Optional[str] = None,
+        nochunks: bool = False,
         output_dir: Optional[Union[str, Path]] = None,
         encrypt_key: Optional[str] = None,
         private_key: Optional[Union[str, Path]] = None,
@@ -55,10 +56,11 @@ class B2CHKS:
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         cancel_token: Optional[Callable[[], bool]] = None,
     ) -> Path:
-        """Compress, chunk, encrypt, and sign a file or directory."""
+        """Compress, optionally chunk, encrypt, and sign a file or directory."""
         return pack(
             source=str(source),
             chunk_size_str=chunk_size,
+            nochunks=nochunks,
             output_dir=str(output_dir) if output_dir else None,
             encrypt_key=encrypt_key,
             private_key_path=str(private_key) if private_key else None,
