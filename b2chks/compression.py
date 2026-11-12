@@ -4,6 +4,7 @@ import io
 import os
 import shutil
 import tarfile
+import concurrent.futures
 from pathlib import Path
 from typing import Tuple, Optional, Callable, BinaryIO
 
@@ -24,23 +25,32 @@ class ChunkSink:
         self.chunk_size = chunk_size
         self.on_chunk = on_chunk
         self.buffer = bytearray()
+        self.offset = 0
 
     def writable(self):
         return True
 
     def write(self, data):
         self.buffer.extend(data)
-        while len(self.buffer) >= self.chunk_size:
-            self.on_chunk(bytes(self.buffer[:self.chunk_size]))
-            del self.buffer[:self.chunk_size]
+        available = len(self.buffer) - self.offset
+        while available >= self.chunk_size:
+            end = self.offset + self.chunk_size
+            self.on_chunk(bytes(self.buffer[self.offset:end]))
+            self.offset = end
+            available -= self.chunk_size
+        if self.offset and (self.offset >= 4 * self.chunk_size or self.offset * 2 >= len(self.buffer)):
+            del self.buffer[:self.offset]
+            self.offset = 0
         return len(data)
 
     def flush(self):
         return None
 
     def finish(self):
-        if self.buffer:
-            self.on_chunk(bytes(self.buffer))
+        if len(self.buffer) > self.offset:
+            self.on_chunk(bytes(self.buffer[self.offset:]))
+        self.buffer.clear()
+        self.offset = 0
 
 
 def compress_to_chunks(
@@ -118,6 +128,7 @@ class ChunkReader:
         self.chunks = iter(chunks)
         self.read_chunk = read_chunk
         self.buffer = b""
+        self.offset = 0
         self.position = 0
 
     def readable(self):
@@ -126,15 +137,33 @@ class ChunkReader:
     def read(self, size=-1):
         if size == 0:
             return b""
-        while size < 0 or len(self.buffer) < size:
+        if size < 0:
+            parts = []
+            if self.offset < len(self.buffer):
+                parts.append(self.buffer[self.offset:])
+            parts.extend(self.read_chunk(chunk) for chunk in self.chunks)
+            result = b"".join(parts)
+            self.buffer = b""
+            self.offset = 0
+            self.position += len(result)
+            return result
+
+        remaining = len(self.buffer) - self.offset
+        while remaining < size:
             try:
-                self.buffer += self.read_chunk(next(self.chunks))
+                next_chunk = self.read_chunk(next(self.chunks))
             except StopIteration:
                 break
-        if size < 0:
-            result, self.buffer = self.buffer, b""
-        else:
-            result, self.buffer = self.buffer[:size], self.buffer[size:]
+            if remaining == 0:
+                self.buffer = next_chunk
+                self.offset = 0
+            else:
+                self.buffer = self.buffer[self.offset:] + next_chunk
+                self.offset = 0
+            remaining = len(self.buffer)
+        end = min(self.offset + size, len(self.buffer))
+        result = self.buffer[self.offset:end]
+        self.offset = end
         self.position += len(result)
         return result
 
@@ -143,6 +172,80 @@ class ChunkReader:
 
     def tell(self):
         return self.position
+
+
+class PrefetchChunkReader(ChunkReader):
+    """Sequential reader that hashes/decrypts upcoming chunks concurrently."""
+
+    def __init__(self, chunks, read_chunk, workers=2):
+        self.chunks = iter(chunks)
+        self.read_chunk = read_chunk
+        self.buffer = b""
+        self.offset = 0
+        self.position = 0
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers))
+        self.futures = []
+        for _ in range(max(1, workers)):
+            self._submit()
+
+    def _submit(self):
+        try:
+            chunk = next(self.chunks)
+        except StopIteration:
+            return
+        self.futures.append(self.executor.submit(self.read_chunk, chunk))
+
+    def _read_next_chunk(self):
+        if not self.futures:
+            return None
+        future = self.futures.pop(0)
+        try:
+            result = future.result()
+        finally:
+            self._submit()
+        return result
+
+    def read(self, size=-1):
+        if size == 0:
+            return b""
+        if size < 0:
+            parts = []
+            if self.offset < len(self.buffer):
+                parts.append(self.buffer[self.offset:])
+            while True:
+                next_chunk = self._read_next_chunk()
+                if next_chunk is None:
+                    break
+                parts.append(next_chunk)
+            result = b"".join(parts)
+            self.buffer = b""
+            self.offset = 0
+            self.position += len(result)
+            self.close()
+            return result
+
+        remaining = len(self.buffer) - self.offset
+        while remaining < size:
+            next_chunk = self._read_next_chunk()
+            if next_chunk is None:
+                break
+            if remaining == 0:
+                self.buffer = next_chunk
+                self.offset = 0
+            else:
+                self.buffer = self.buffer[self.offset:] + next_chunk
+                self.offset = 0
+            remaining = len(self.buffer)
+        end = min(self.offset + size, len(self.buffer))
+        result = self.buffer[self.offset:end]
+        self.offset = end
+        self.position += len(result)
+        return result
+
+    def close(self):
+        if self.executor is not None:
+            self.executor.shutdown(wait=True, cancel_futures=True)
+            self.executor = None
 
 def compress_stream(
     source_path: Path,

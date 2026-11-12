@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Callable, Dict, Any, Tuple, List
 
 from b2chks.chunking import ByteBudget
-from b2chks.compression import decompress_stream, decompress_reader, ChunkReader
+from b2chks.compression import decompress_stream, decompress_reader, PrefetchChunkReader
 from b2chks.encryption import (
     NONCE_SIZE,
     TAG_SIZE,
@@ -316,13 +316,8 @@ def extract(
     out_base = Path(output_dir).resolve() if output_dir else Path.cwd()
     out_base.mkdir(parents=True, exist_ok=True)
 
-    if max_compression_ratio is not None:
-        compressed_size = sum(item[1].stat().st_size for item in chunk_targets) if 'chunk_targets' in locals() else 0
-        if compressed_size and package_info.get("total_size_bytes", 0) / compressed_size > max_compression_ratio:
-            print("[-] Package exceeds the configured compression-ratio limit.")
-            return False
-
     stage_dir = Path(tempfile.mkdtemp(prefix=".b2chks-", dir=out_base))
+    reader = None
     try:
         # Direct filename lookup without rescanning the directory
         chunk_targets: List[Tuple[int, Path, str]] = []
@@ -342,6 +337,12 @@ def extract(
                 print(f"[-] Chunk {idx} exceeds the configured memory limit.")
                 return False
             chunk_targets.append((idx, cf_path, expected_hash))
+
+        if max_compression_ratio is not None:
+            compressed_size = sum(path.stat().st_size for _, path, _ in chunk_targets)
+            if compressed_size and package_info.get("total_size_bytes", 0) / compressed_size > max_compression_ratio:
+                print("[-] Package exceeds the configured compression-ratio limit.")
+                return False
 
         def read_verified(item):
             idx, cpath, expected_hash = item
@@ -363,9 +364,10 @@ def extract(
                     ) from exc
             return raw
 
-        reader = ChunkReader(
+        reader = PrefetchChunkReader(
             chunk_targets,
             lambda item: read_verified(item),
+            workers=workers if workers and workers > 0 else min(os.cpu_count() or 2, 4),
         )
         try:
             destination_path = decompress_reader(
@@ -394,4 +396,6 @@ def extract(
         return True
 
     finally:
+        if reader is not None:
+            reader.close()
         shutil.rmtree(stage_dir, ignore_errors=True)

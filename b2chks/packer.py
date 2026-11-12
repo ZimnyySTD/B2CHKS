@@ -151,10 +151,13 @@ def pack(
     effective_chunk_size = chunk_size
     payload_size = max(1, chunk_size - NONCE_SIZE - TAG_SIZE) if is_encrypted else chunk_size
 
-    def emit_chunk(payload: bytes):
+    max_workers = workers if workers and workers > 0 else min(os.cpu_count() or 2, 4)
+    pending = []
+    next_index = 0
+
+    def write_chunk(index: int, payload: bytes):
         if cancel_token and cancel_token():
             raise CancelledError("Packing cancelled by user")
-        index = len(chunks_meta)
         if is_encrypted and cipher:
             nonce = os.urandom(NONCE_SIZE)
             file_bytes = nonce + cipher.encrypt(
@@ -164,22 +167,44 @@ def pack(
             file_bytes = payload
         filename = f"chunk_{index:03d}.bin"
         path = out_dir / filename
-        h = hashlib.sha256(file_bytes).hexdigest()
-        path.write_bytes(file_bytes)
-        chunks_meta.append({"index": index, "filename": filename, "size": len(file_bytes), "sha256": h})
+        with open(path, "wb", buffering=1024 * 1024) as chunk_file:
+            chunk_file.write(file_bytes)
+        return {
+            "index": index,
+            "filename": filename,
+            "size": len(file_bytes),
+            "sha256": hashlib.sha256(file_bytes).hexdigest(),
+        }
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+
+    def emit_chunk(payload: bytes):
+        nonlocal next_index
+        if cancel_token and cancel_token():
+            raise CancelledError("Packing cancelled by user")
+        pending.append(executor.submit(write_chunk, next_index, payload))
+        next_index += 1
+        if len(pending) >= max_workers * 2:
+            chunks_meta.append(pending.pop(0).result())
         if progress_callback:
             progress_callback(len(chunks_meta), 0, "chunking")
 
-    total_uncompressed_size, source_type = compress_to_chunks(
-        source_path,
-        out_dir,
-        payload_size,
-        actual_compression,
-        emit_chunk,
-        progress_callback=progress_callback,
-    )
-    if not chunks_meta:
-        emit_chunk(b"")
+    try:
+        total_uncompressed_size, source_type = compress_to_chunks(
+            source_path,
+            out_dir,
+            payload_size,
+            actual_compression,
+            emit_chunk,
+            progress_callback=progress_callback,
+        )
+        if not pending and not chunks_meta:
+            emit_chunk(b"")
+        while pending:
+            chunks_meta.append(pending.pop(0).result())
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    chunks_meta.sort(key=lambda item: item["index"])
 
     package_info: Dict[str, Any] = {
         "name": source_path.name,
