@@ -12,8 +12,11 @@ def create_zip(
     source: Path,
     output_dir: Path,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    compression_level: int = 9,
 ) -> Path:
     """Create a conventional ZIP archive without manifests or chunk files."""
+    if not 0 <= compression_level <= 9:
+        raise ValueError("ZIP compression level must be between 0 and 9")
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / f"{source.name}.zip"
     files = []
@@ -37,7 +40,7 @@ def create_zip(
             temp_path,
             "w",
             compression=zipfile.ZIP_DEFLATED,
-            compresslevel=1,
+            compresslevel=compression_level,
             allowZip64=True,
         ) as archive:
             for path, arcname in files:

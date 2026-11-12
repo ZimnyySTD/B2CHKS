@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
 
 from b2chks.chunking import parse_size, ByteBudget
-from b2chks.compression import compress_to_chunks
+from b2chks.compression import DEFAULT_ZSTD_LEVEL, compress_to_chunks
 from b2chks.archive import create_zip
 from b2chks.encryption import (
     NONCE_SIZE,
@@ -77,6 +77,7 @@ def pack(
     author: Optional[str] = None,
     generate_key: bool = False,
     compression: str = "zstd",
+    compression_level: int = DEFAULT_ZSTD_LEVEL,
     kdf: str = "scrypt",
     workers: Optional[int] = None,
     memory_budget_bytes: Optional[int] = None,
@@ -97,7 +98,7 @@ def pack(
     if not chunk_size_str and not nochunks:
         if encrypt_key or private_key_path or generate_key or author:
             raise ValueError("Encryption and signing require --chunk-size or --nochunks; plain ZIP archives do not contain a manifest.")
-        return create_zip(source_path, out_dir, progress_callback)
+        return create_zip(source_path, out_dir, progress_callback, compression_level)
 
     priv_file = private_key_path
     if generate_key or (priv_file and not Path(priv_file).exists() and priv_file == "auto"):
@@ -204,6 +205,7 @@ def pack(
             actual_compression,
             emit_chunk,
             progress_callback=progress_callback,
+            compression_level=compression_level,
         )
         if not pending and not chunks_meta:
             emit_chunk(b"")

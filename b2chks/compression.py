@@ -14,6 +14,7 @@ if HAVE_ZSTANDARD:
     import zstandard as zstd
 
 STREAM_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB streaming buffer
+DEFAULT_ZSTD_LEVEL = 9
 
 
 class ChunkSink:
@@ -59,6 +60,7 @@ def compress_to_chunks(
     algorithm: str,
     on_chunk,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    compression_level: int = DEFAULT_ZSTD_LEVEL,
 ) -> Tuple[int, str]:
     """Compress directly into chunk-sized payloads."""
     if not source_path.exists():
@@ -69,6 +71,8 @@ def compress_to_chunks(
     if not HAVE_ZSTANDARD:
         from b2chks.backends import require_zstandard
         require_zstandard()
+    if not -5 <= compression_level <= 22:
+        raise ValueError("Zstandard compression level must be between -5 and 22")
 
     if source_path.is_file():
         source_type = "file"
@@ -90,7 +94,7 @@ def compress_to_chunks(
 
     if source_type == "file":
         with open(source_path, "rb", buffering=STREAM_BUFFER_SIZE) as source:
-            compressor = zstd.ZstdCompressor(level=1).stream_writer(sink)
+            compressor = zstd.ZstdCompressor(level=compression_level).stream_writer(sink)
             with compressor:
                 processed = 0
                 while True:
@@ -102,7 +106,7 @@ def compress_to_chunks(
                     if progress_callback:
                         progress_callback(processed, total_size, "compressing")
     else:
-        compressor = zstd.ZstdCompressor(level=1).stream_writer(sink)
+        compressor = zstd.ZstdCompressor(level=compression_level).stream_writer(sink)
         with compressor:
             with tarfile.open(fileobj=compressor, mode="w|") as tar:
                 tar.add(str(source_path), arcname=source_path.name)

@@ -84,6 +84,10 @@ b2chks pack ./my_game_folder --chunk-size 100m --encrypt-key "MySecretPassphrase
 ```
 
 Zstandard is the only compression format used by B2CHKS packages.
+Compression is lossless. The default Zstandard level is 9; pass
+`--compression-level -5..22` to tune speed versus archive size. Standard ZIP
+mode uses maximum lossless DEFLATE compression by default and accepts levels
+`0..9`.
 
 ---
 
