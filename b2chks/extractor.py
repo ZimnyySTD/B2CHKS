@@ -4,11 +4,13 @@ import getpass
 import hashlib
 import os
 import sys
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, Tuple, List
 
 from b2chks.chunking import ByteBudget
-from b2chks.compression import decompress_stream
+from b2chks.compression import decompress_stream, decompress_reader, ChunkReader
 from b2chks.encryption import (
     NONCE_SIZE,
     TAG_SIZE,
@@ -19,6 +21,7 @@ from b2chks.exceptions import (
     IntegrityError,
     AuthenticationError,
     DecryptionError,
+    CompressionError,
     CancelledError,
 )
 from b2chks.hashing import hash_file
@@ -67,6 +70,7 @@ def verify(
     manifest_path: Optional[str] = None,
     chunks_dir: Optional[str] = None,
     public_key_path: Optional[str] = None,
+    trusted_public_key_path: Optional[str] = None,
     workers: Optional[int] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     cancel_token: Optional[Callable[[], bool]] = None,
@@ -84,7 +88,10 @@ def verify(
     sec = manifest.get("security", {})
     signature_hex = sec.get("signature")
     pub_key_hex = sec.get("public_key")
-    pub_source = public_key_path or pub_key_hex or (c_dir / "public.pem") or Path("public.pem")
+    pub_source = trusted_public_key_path or public_key_path or pub_key_hex
+    if not pub_source:
+        candidate = c_dir / "public.pem"
+        pub_source = candidate if candidate.exists() else Path("public.pem")
 
     if signature_hex:
         canonical_bytes = get_canonical_json_bytes(manifest)
@@ -92,6 +99,9 @@ def verify(
             print("[-] Cryptographic signature verification FAILED.")
             return False
         print(f"[+] Authorship signature VALID (Developer ID: '{sec.get('developer_id')}').")
+    elif trusted_public_key_path:
+        print("[-] A trusted public key was supplied but the manifest is unsigned.")
+        return False
     else:
         print("[*] Manifest is unsigned.")
 
@@ -212,8 +222,13 @@ def extract(
     output_dir: Optional[str] = None,
     decrypt_key: Optional[str] = None,
     public_key_path: Optional[str] = None,
+    trusted_public_key_path: Optional[str] = None,
     workers: Optional[int] = None,
     memory_budget_bytes: Optional[int] = None,
+    max_output_size: Optional[int] = None,
+    max_files: Optional[int] = None,
+    max_file_size: Optional[int] = None,
+    max_compression_ratio: Optional[float] = None,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
     cancel_token: Optional[Callable[[], bool]] = None,
 ) -> bool:
@@ -234,7 +249,10 @@ def extract(
     sec = manifest.get("security", {})
     signature_hex = sec.get("signature")
     pub_key_hex = sec.get("public_key")
-    pub_source = public_key_path or pub_key_hex or (c_dir / "public.pem") or Path("public.pem")
+    pub_source = trusted_public_key_path or public_key_path or pub_key_hex
+    if not pub_source:
+        candidate = c_dir / "public.pem"
+        pub_source = candidate if candidate.exists() else Path("public.pem")
 
     if signature_hex:
         canonical_bytes = get_canonical_json_bytes(manifest)
@@ -242,12 +260,27 @@ def extract(
             print("[-] Cryptographic signature verification FAILED.")
             return False
         print(f"[+] Authorship signature VALID (Developer ID: '{sec.get('developer_id')}').")
+    elif trusted_public_key_path:
+        print("[-] A trusted public key was supplied but the manifest is unsigned.")
+        return False
 
     package_info = manifest.get("package_info", {})
     is_encrypted = package_info.get("encrypted", False)
     source_type = package_info.get("source_type", "file")
     target_name = package_info.get("name", "extracted_output")
     compression_algo = package_info.get("compression", "gzip")
+    if Path(target_name).name != target_name or Path(target_name).is_absolute():
+        print("[-] Unsafe output name in manifest.")
+        return False
+    if max_output_size is not None and package_info.get("total_size_bytes", 0) > max_output_size:
+        print("[-] Package exceeds the configured output-size limit.")
+        return False
+    if max_files is not None and source_type == "file" and max_files < 1:
+        print("[-] Package exceeds the configured file-count limit.")
+        return False
+    if max_file_size is not None and source_type == "file" and package_info.get("total_size_bytes", 0) > max_file_size:
+        print("[-] Package exceeds the configured file-size limit.")
+        return False
 
     cipher = None
     if is_encrypted:
@@ -283,14 +316,14 @@ def extract(
     out_base = Path(output_dir).resolve() if output_dir else Path.cwd()
     out_base.mkdir(parents=True, exist_ok=True)
 
-    temp_reassembled = out_base / f".tmp_{target_name}.archive"
+    if max_compression_ratio is not None:
+        compressed_size = sum(item[1].stat().st_size for item in chunk_targets) if 'chunk_targets' in locals() else 0
+        if compressed_size and package_info.get("total_size_bytes", 0) / compressed_size > max_compression_ratio:
+            print("[-] Package exceeds the configured compression-ratio limit.")
+            return False
 
+    stage_dir = Path(tempfile.mkdtemp(prefix=".b2chks-", dir=out_base))
     try:
-        max_workers = workers if workers and workers > 0 else min(os.cpu_count() or 4, 8)
-        chunk_size_bytes = package_info.get("chunk_size_bytes", 1024 * 1024)
-        budget_limit = memory_budget_bytes or max(MAX_EXTRACT_BUDGET, chunk_size_bytes * 2)
-        byte_budget = ByteBudget(budget_limit)
-
         # Direct filename lookup without rescanning the directory
         chunk_targets: List[Tuple[int, Path, str]] = []
         for chunk_info in chunks:
@@ -301,74 +334,64 @@ def extract(
             if not cf_path:
                 print(f"[-] Could not find chunk file for index {idx} ({expected_name})")
                 return False
+            expected_size = chunk_info.get("size")
+            if expected_size is not None and cf_path.stat().st_size != expected_size:
+                print(f"[-] Chunk size mismatch for index {idx}")
+                return False
+            if memory_budget_bytes is not None and expected_size is not None and expected_size > memory_budget_bytes:
+                print(f"[-] Chunk {idx} exceeds the configured memory limit.")
+                return False
             chunk_targets.append((idx, cf_path, expected_hash))
 
-        # Single-pass streaming read, hash, decrypt, and write
-        with open(temp_reassembled, "wb", buffering=4*1024*1024) as out_f:
-            decrypted_buffer: Dict[int, bytes] = {}
-            next_write_idx = 0
-            total_chunks = len(chunk_targets)
+        def read_verified(item):
+            idx, cpath, expected_hash = item
+            if cancel_token and cancel_token():
+                raise CancelledError("Extraction cancelled by user")
+            raw = cpath.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != expected_hash:
+                raise IntegrityError(f"Hash mismatch on chunk {idx} ({cpath.name})")
+            if is_encrypted and cipher:
+                if len(raw) < NONCE_SIZE + TAG_SIZE:
+                    raise DecryptionError(f"Corrupt encrypted chunk {idx}: file too small")
+                try:
+                    return cipher.decrypt(
+                        raw[:NONCE_SIZE], raw[NONCE_SIZE:], associated_data=idx.to_bytes(4, "big")
+                    )
+                except Exception as exc:
+                    raise DecryptionError(
+                        f"Cryptographic authentication tag mismatch on chunk {idx}"
+                    ) from exc
+            return raw
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                in_flight: Dict[concurrent.futures.Future, int] = {}
-                submit_iter = iter(chunk_targets)
-
-                while next_write_idx < total_chunks:
-                    if cancel_token and cancel_token():
-                        raise CancelledError("Extraction cancelled by user")
-
-                    # Submit chunks up to budget
-                    while len(in_flight) < (max_workers * 2):
-                        try:
-                            idx, cpath, exp_hash = next(submit_iter)
-                            byte_budget.acquire(chunk_size_bytes)
-                            fut = executor.submit(
-                                _read_and_process_chunk,
-                                idx,
-                                cpath,
-                                exp_hash,
-                                is_encrypted,
-                                cipher,
-                                byte_budget,
-                            )
-                            in_flight[fut] = idx
-                        except StopIteration:
-                            break
-
-                    if not in_flight:
-                        break
-
-                    done, _ = concurrent.futures.wait(in_flight.keys(), return_when=concurrent.futures.FIRST_COMPLETED)
-                    for d in done:
-                        try:
-                            c_idx, chunk_bytes = d.result()
-                            decrypted_buffer[c_idx] = chunk_bytes
-                            del in_flight[d]
-                        except Exception as e:
-                            print(f"[-] Extraction error: {e}")
-                            return False
-
-                    # Write contiguous chunks in order to disk
-                    while next_write_idx in decrypted_buffer:
-                        data_to_write = decrypted_buffer.pop(next_write_idx)
-                        out_f.write(data_to_write)
-                        byte_budget.release(chunk_size_bytes)
-                        next_write_idx += 1
-                        if progress_callback:
-                            progress_callback(next_write_idx, total_chunks, "extracting")
-
-        # Decompress reconstructed archive directly
-        destination_path = decompress_stream(
-            temp_reassembled,
-            out_base,
-            target_name,
-            source_type,
-            algorithm=compression_algo,
+        reader = ChunkReader(
+            chunk_targets,
+            lambda item: read_verified(item),
         )
-
-        print(f"[+] Reassembly and extraction complete -> {destination_path}")
+        try:
+            destination_path = decompress_reader(
+                reader,
+                stage_dir,
+                target_name,
+                source_type,
+                algorithm=compression_algo,
+                max_files=max_files,
+                max_file_size=max_file_size,
+            )
+        except (IntegrityError, DecryptionError, AuthenticationError, CompressionError) as exc:
+            print(f"[-] Extraction error: {exc}")
+            return False
+        final_path = out_base / target_name
+        if final_path.exists():
+            if final_path.is_dir():
+                shutil.rmtree(final_path)
+            else:
+                final_path.unlink()
+        stage_target = stage_dir / target_name
+        stage_target.replace(final_path)
+        if progress_callback:
+            progress_callback(len(chunk_targets), len(chunk_targets), "extracting")
+        print(f"[+] Reassembly and extraction complete -> {final_path}")
         return True
 
     finally:
-        if temp_reassembled.exists():
-            temp_reassembled.unlink()
+        shutil.rmtree(stage_dir, ignore_errors=True)

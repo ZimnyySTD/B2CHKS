@@ -15,6 +15,135 @@ if HAVE_ZSTANDARD:
 
 STREAM_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB streaming buffer
 
+
+class ChunkSink:
+    """File-like sink that emits bounded compressed chunks without an archive pass."""
+
+    def __init__(self, out_dir: Path, chunk_size: int, on_chunk):
+        self.out_dir = out_dir
+        self.chunk_size = chunk_size
+        self.on_chunk = on_chunk
+        self.buffer = bytearray()
+
+    def writable(self):
+        return True
+
+    def write(self, data):
+        self.buffer.extend(data)
+        while len(self.buffer) >= self.chunk_size:
+            self.on_chunk(bytes(self.buffer[:self.chunk_size]))
+            del self.buffer[:self.chunk_size]
+        return len(data)
+
+    def flush(self):
+        return None
+
+    def finish(self):
+        if self.buffer:
+            self.on_chunk(bytes(self.buffer))
+
+
+def compress_to_chunks(
+    source_path: Path,
+    out_dir: Path,
+    chunk_size: int,
+    algorithm: str,
+    on_chunk,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+) -> Tuple[int, str]:
+    """Compress directly into chunk-sized payloads."""
+    if not source_path.exists():
+        raise FileNotFoundError(f"Source path {source_path} does not exist")
+    algo = algorithm.lower()
+    if algo == "zstd" and not HAVE_ZSTANDARD:
+        algo = "gzip"
+    if algo not in ("gzip", "zstd"):
+        algo = "gzip"
+
+    if source_path.is_file():
+        source_type = "file"
+        total_size = source_path.stat().st_size
+    elif source_path.is_dir():
+        source_type = "directory"
+        total_size = sum(
+            fp.stat().st_size
+            for root, _, files in os.walk(source_path)
+            for fp in (Path(root) / name for name in files)
+            if not fp.is_symlink()
+        )
+    else:
+        raise CompressionError(f"Unsupported source path: {source_path}")
+
+    sink = ChunkSink(out_dir, chunk_size, on_chunk)
+    if progress_callback:
+        progress_callback(0, total_size, "compressing")
+
+    if source_type == "file":
+        with open(source_path, "rb", buffering=STREAM_BUFFER_SIZE) as source:
+            if algo == "zstd":
+                compressor = zstd.ZstdCompressor(level=1).stream_writer(sink)
+            else:
+                compressor = gzip.GzipFile(fileobj=sink, mode="wb", compresslevel=1)
+            with compressor:
+                processed = 0
+                while True:
+                    buf = source.read(STREAM_BUFFER_SIZE)
+                    if not buf:
+                        break
+                    compressor.write(buf)
+                    processed += len(buf)
+                    if progress_callback:
+                        progress_callback(processed, total_size, "compressing")
+    else:
+        if algo == "zstd":
+            compressor = zstd.ZstdCompressor(level=1).stream_writer(sink)
+            with compressor:
+                with tarfile.open(fileobj=compressor, mode="w|") as tar:
+                    tar.add(str(source_path), arcname=source_path.name)
+        else:
+            with gzip.GzipFile(fileobj=sink, mode="wb", compresslevel=1) as gz:
+                with tarfile.open(fileobj=gz, mode="w|") as tar:
+                    tar.add(str(source_path), arcname=source_path.name)
+
+    sink.finish()
+    if progress_callback:
+        progress_callback(total_size, total_size, "compressing")
+    return total_size, source_type
+
+
+class ChunkReader:
+    """Sequential reader over verified, optionally decrypted chunk payloads."""
+
+    def __init__(self, chunks, read_chunk):
+        self.chunks = iter(chunks)
+        self.read_chunk = read_chunk
+        self.buffer = b""
+        self.position = 0
+
+    def readable(self):
+        return True
+
+    def read(self, size=-1):
+        if size == 0:
+            return b""
+        while size < 0 or len(self.buffer) < size:
+            try:
+                self.buffer += self.read_chunk(next(self.chunks))
+            except StopIteration:
+                break
+        if size < 0:
+            result, self.buffer = self.buffer, b""
+        else:
+            result, self.buffer = self.buffer[:size], self.buffer[size:]
+        self.position += len(result)
+        return result
+
+    def seekable(self):
+        return False
+
+    def tell(self):
+        return self.position
+
 def compress_stream(
     source_path: Path,
     output_path: Path,
@@ -158,3 +287,60 @@ def decompress_stream(
         raise CompressionError(f"Unknown source type: {source_type}")
 
     return destination_path
+
+
+def decompress_reader(
+    reader,
+    output_dir: Path,
+    target_name: str,
+    source_type: str,
+    algorithm: str = "gzip",
+    max_files: Optional[int] = None,
+    max_file_size: Optional[int] = None,
+) -> Path:
+    """Decompress a sequential reader directly into the destination."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination_path = output_dir / target_name
+    algo = algorithm.lower()
+    if source_type == "file":
+        if algo == "zstd" and HAVE_ZSTANDARD:
+            with zstd.ZstdDecompressor().stream_reader(reader) as decompressed, open(destination_path, "wb") as out:
+                shutil.copyfileobj(decompressed, out, STREAM_BUFFER_SIZE)
+        else:
+            with gzip.GzipFile(fileobj=reader, mode="rb") as decompressed, open(destination_path, "wb") as out:
+                shutil.copyfileobj(decompressed, out, STREAM_BUFFER_SIZE)
+    elif source_type == "directory":
+        if algo == "zstd" and HAVE_ZSTANDARD:
+            with zstd.ZstdDecompressor().stream_reader(reader) as decompressed:
+                with tarfile.open(fileobj=decompressed, mode="r|") as tar:
+                    _safe_extract_tar_stream(tar, output_dir, max_files, max_file_size)
+        else:
+            with tarfile.open(fileobj=reader, mode="r|gz") as tar:
+                _safe_extract_tar_stream(tar, output_dir, max_files, max_file_size)
+    else:
+        raise CompressionError(f"Unknown source type: {source_type}")
+    return destination_path
+
+
+def _safe_extract_tar_stream(tar: tarfile.TarFile, target_dir: Path, max_files=None, max_file_size=None):
+    """Safely extract a streaming tar archive member by member."""
+    target_dir_resolved = target_dir.resolve()
+    file_count = 0
+    for member in tar:
+        file_count += 1
+        if max_files is not None and file_count > max_files:
+            raise CompressionError("Archive exceeds the configured file-count limit")
+        if max_file_size is not None and member.size > max_file_size:
+            raise CompressionError(f"Archive member exceeds the configured file-size limit: {member.name}")
+        member_path = (target_dir / member.name).resolve()
+        try:
+            member_path.relative_to(target_dir_resolved)
+        except ValueError as exc:
+            raise CompressionError(f"Attempted path traversal in archive: {member.name}") from exc
+        if member.islnk() or member.issym():
+            link_target = (member_path.parent / member.linkname).resolve()
+            try:
+                link_target.relative_to(target_dir_resolved)
+            except ValueError as exc:
+                raise CompressionError(f"Attempted symlink traversal in archive: {member.name}") from exc
+        tar.extract(member, path=target_dir, set_attrs=True)

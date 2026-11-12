@@ -1,5 +1,6 @@
 """Native-only Ed25519 signing and verification with cryptography."""
 import base64
+import os
 from pathlib import Path
 from typing import Optional, Tuple, Any
 
@@ -43,6 +44,11 @@ def generate_keypair(author: str = "author", out_dir: str = ".") -> Tuple[str, s
         f.write(priv_bytes)
     with open(pub_file, "wb") as f:
         f.write(pub_bytes)
+    try:
+        os.chmod(priv_file, 0o600)
+        os.chmod(pub_file, 0o644)
+    except OSError:
+        pass
 
     return str(priv_file), str(pub_file)
 

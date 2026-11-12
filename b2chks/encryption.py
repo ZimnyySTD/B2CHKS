@@ -29,13 +29,16 @@ def derive_aes_key(passphrase: str, salt: bytes, kdf_name: str = DEFAULT_KDF, kd
         r = params.get("r", SCRYPT_R)
         p = params.get("p", SCRYPT_P)
         maxmem = params.get("maxmem", SCRYPT_MAXMEM)
-        try:
-            return hashlib.scrypt(pw_bytes, salt=salt, n=n, r=r, p=p, maxmem=maxmem, dklen=32)
-        except Exception:
-            return hashlib.scrypt(pw_bytes, salt=salt, n=16384, r=8, p=1, maxmem=67108864, dklen=32)
+        if n < 2 or (n & (n - 1)) != 0 or r <= 0 or p <= 0:
+            raise ValueError("Invalid scrypt parameters")
+        if n > 1 << 20 or r > 32 or p > 16:
+            raise ValueError("scrypt parameters exceed safety limits")
+        return hashlib.scrypt(pw_bytes, salt=salt, n=n, r=r, p=p, maxmem=maxmem, dklen=32)
     else:
         params = kdf_params or {}
         iterations = params.get("iterations", PBKDF2_ITERATIONS)
+        if not isinstance(iterations, int) or iterations < 100_000 or iterations > 10_000_000:
+            raise ValueError("PBKDF2 iterations must be between 100000 and 10000000")
         return hashlib.pbkdf2_hmac("sha256", pw_bytes, salt, iterations, dklen=32)
 
 
