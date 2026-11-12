@@ -107,4 +107,4 @@ python benchmarks/benchmark_suite.py
 ---
 
 ## License & Protocol
-ChunkCore / B2CHKS Protocol v1.
+©B2CHKS
