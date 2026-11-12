@@ -50,6 +50,12 @@ def main(custom_argv: Optional[List[str]] = None):
     parser_pack.add_argument("--encrypt-key", "-e", dest="encrypt_key", type=str, default=None, help="Passphrase to encrypt with AES-256-GCM")
     parser_pack.add_argument("--kdf", type=str, choices=["scrypt", "pbkdf2"], default="scrypt", help="Key derivation function (default: scrypt)")
     parser_pack.add_argument("--compression", type=str, choices=["zstd"], default="zstd", help="B2CHKS compression (Zstandard)")
+    parser_pack.add_argument(
+        "--compression-level",
+        type=int,
+        default=9,
+        help="Lossless compression strength: ZIP 0-9, Zstandard -5-22 (default: 9)",
+    )
     parser_pack.add_argument("--private-key", "-k", dest="private_key", type=str, default=None, help="Path to Ed25519 private.pem to sign manifest")
     parser_pack.add_argument("--author", "-a", type=str, default=None, help="Author/Developer ID for manifest")
     parser_pack.add_argument("--output-dir", "-o", dest="output_dir", type=str, default=None, help="Output directory for package and manifest")
@@ -120,6 +126,7 @@ def main(custom_argv: Optional[List[str]] = None):
                 author=args.author,
                 generate_key=args.generate_key,
                 compression=args.compression,
+                compression_level=args.compression_level,
                 kdf=args.kdf,
                 workers=args.workers,
                 progress_callback=progress.callback,

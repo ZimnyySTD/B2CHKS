@@ -36,6 +36,8 @@ with no manifest or chunk files:
 ```bash
 b2chks pack ./my_project
 ```
+ZIP uses lossless maximum compression by default. Use `--compression-level 0`
+through `9` to trade archive size for speed.
 
 ### 3. B2CHKS packaging without chunking (`--nochunks`)
 To compress a file or directory into a single package without splitting into multiple chunks:
@@ -51,6 +53,9 @@ b2chks pack ./my_game_folder --chunk-size 100m
 # Split with AES-256-GCM encryption + scrypt
 b2chks pack ./my_game_folder --chunk-size 100m --encrypt-key "MySecretPassphrase123"
 ```
+Chunked B2CHKS packages use lossless Zstandard level 9 by default. Use
+`--compression-level` from `-5` through `22` to choose a faster or stronger
+Zstandard setting; higher levels use more CPU and may use more memory.
 
 ### 5. Verify Chunks & Signature
 ```bash

@@ -5,6 +5,7 @@ from typing import Optional, Callable, Tuple, Union
 
 from b2chks.extractor import verify, extract
 from b2chks.packer import pack
+from b2chks.compression import DEFAULT_ZSTD_LEVEL
 from b2chks.signing import generate_keypair
 
 @dataclass
@@ -16,6 +17,7 @@ class PackConfig:
     private_key: Optional[str] = None
     author: Optional[str] = None
     compression: str = "zstd"
+    compression_level: int = DEFAULT_ZSTD_LEVEL
     kdf: str = "scrypt"
     workers: Optional[int] = None
     generate_key: bool = False
@@ -50,6 +52,7 @@ class B2CHKS:
         private_key: Optional[Union[str, Path]] = None,
         author: Optional[str] = None,
         compression: str = "zstd",
+        compression_level: int = DEFAULT_ZSTD_LEVEL,
         kdf: str = "scrypt",
         workers: Optional[int] = None,
         generate_key: bool = False,
@@ -66,6 +69,7 @@ class B2CHKS:
             private_key_path=str(private_key) if private_key else None,
             author=author,
             compression=compression,
+            compression_level=compression_level,
             kdf=kdf,
             workers=workers,
             generate_key=generate_key,
