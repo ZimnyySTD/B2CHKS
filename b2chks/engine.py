@@ -10,12 +10,12 @@ from b2chks.signing import generate_keypair
 @dataclass
 class PackConfig:
     """Configuration parameters for packaging."""
-    chunk_size: str = "500m"
+    chunk_size: Optional[str] = None
     output_dir: Optional[str] = None
     encrypt_key: Optional[str] = None
     private_key: Optional[str] = None
     author: Optional[str] = None
-    compression: str = "gzip"
+    compression: str = "zstd"
     kdf: str = "scrypt"
     workers: Optional[int] = None
     generate_key: bool = False
@@ -49,7 +49,7 @@ class B2CHKS:
         encrypt_key: Optional[str] = None,
         private_key: Optional[Union[str, Path]] = None,
         author: Optional[str] = None,
-        compression: str = "gzip",
+        compression: str = "zstd",
         kdf: str = "scrypt",
         workers: Optional[int] = None,
         generate_key: bool = False,

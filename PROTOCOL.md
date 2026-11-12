@@ -23,7 +23,7 @@ The manifest is a UTF-8 encoded JSON document describing the package topology, s
     "chunk_size_bytes": 524288000,
     "total_chunks": 5,
     "encrypted": true,
-    "compression": "gzip"
+    "compression": "zstd"
   },
   "encryption": {
     "algorithm": "AES-256-GCM",
@@ -64,7 +64,7 @@ Identifier indicating protocol specification. Accepted values for backward compa
 - `chunk_size_bytes` (integer): Maximum user-defined target chunk payload size.
 - `total_chunks` (integer): Total count of chunk files making up the archive.
 - `encrypted` (boolean): `true` if chunk payloads are encrypted with AES-256-GCM, `false` otherwise.
-- `compression` (string, optional): Stream compression algorithm used (`"gzip"` or `"zstd"`). Default is `"gzip"`.
+- `compression` (string, required for B2CHKS packages): Zstandard (`"zstd"`).
 
 #### `encryption` (object, required if `encrypted == true`)
 - `algorithm` (string): Cryptographic cipher (`"AES-256-GCM"`).

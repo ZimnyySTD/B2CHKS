@@ -1,5 +1,4 @@
-"""Compression adapters supporting gzip, zlib, and Zstandard (zstd)."""
-import gzip
+"""Zstandard compression adapters for B2CHKS packages."""
 import io
 import os
 import shutil
@@ -65,10 +64,11 @@ def compress_to_chunks(
     if not source_path.exists():
         raise FileNotFoundError(f"Source path {source_path} does not exist")
     algo = algorithm.lower()
-    if algo == "zstd" and not HAVE_ZSTANDARD:
-        algo = "gzip"
-    if algo not in ("gzip", "zstd"):
-        algo = "gzip"
+    if algo != "zstd":
+        raise CompressionError("Only Zstandard compression is supported")
+    if not HAVE_ZSTANDARD:
+        from b2chks.backends import require_zstandard
+        require_zstandard()
 
     if source_path.is_file():
         source_type = "file"
@@ -90,10 +90,7 @@ def compress_to_chunks(
 
     if source_type == "file":
         with open(source_path, "rb", buffering=STREAM_BUFFER_SIZE) as source:
-            if algo == "zstd":
-                compressor = zstd.ZstdCompressor(level=1).stream_writer(sink)
-            else:
-                compressor = gzip.GzipFile(fileobj=sink, mode="wb", compresslevel=1)
+            compressor = zstd.ZstdCompressor(level=1).stream_writer(sink)
             with compressor:
                 processed = 0
                 while True:
@@ -105,15 +102,10 @@ def compress_to_chunks(
                     if progress_callback:
                         progress_callback(processed, total_size, "compressing")
     else:
-        if algo == "zstd":
-            compressor = zstd.ZstdCompressor(level=1).stream_writer(sink)
-            with compressor:
-                with tarfile.open(fileobj=compressor, mode="w|") as tar:
-                    tar.add(str(source_path), arcname=source_path.name)
-        else:
-            with gzip.GzipFile(fileobj=sink, mode="wb", compresslevel=1) as gz:
-                with tarfile.open(fileobj=gz, mode="w|") as tar:
-                    tar.add(str(source_path), arcname=source_path.name)
+        compressor = zstd.ZstdCompressor(level=1).stream_writer(sink)
+        with compressor:
+            with tarfile.open(fileobj=compressor, mode="w|") as tar:
+                tar.add(str(source_path), arcname=source_path.name)
 
     sink.finish()
     if progress_callback:
@@ -250,7 +242,7 @@ class PrefetchChunkReader(ChunkReader):
 def compress_stream(
     source_path: Path,
     output_path: Path,
-    algorithm: str = "gzip",
+    algorithm: str = "zstd",
     compress_level: int = 1,
     progress_callback: Optional[Callable[[int, int, str], None]] = None,
 ) -> Tuple[int, str]:
@@ -262,11 +254,11 @@ def compress_stream(
         raise FileNotFoundError(f"Source path {source_path} does not exist")
 
     algo = algorithm.lower()
-    if algo not in ["gzip", "zstd"]:
-        algo = "gzip"
-
-    if algo == "zstd" and not HAVE_ZSTANDARD:
-        algo = "gzip"
+    if algo != "zstd":
+        raise CompressionError("Only Zstandard compression is supported")
+    if not HAVE_ZSTANDARD:
+        from b2chks.backends import require_zstandard
+        require_zstandard()
 
     if source_path.is_file():
         source_type = "file"
@@ -286,15 +278,7 @@ def compress_stream(
                         if progress_callback:
                             progress_callback(bytes_processed, total_size, "compressing")
         else:
-            with open(source_path, "rb", buffering=STREAM_BUFFER_SIZE) as f_in, gzip.open(output_path, "wb", compresslevel=compress_level) as f_out:
-                while True:
-                    buf = f_in.read(STREAM_BUFFER_SIZE)
-                    if not buf:
-                        break
-                    f_out.write(buf)
-                    bytes_processed += len(buf)
-                    if progress_callback:
-                        progress_callback(bytes_processed, total_size, "compressing")
+            raise CompressionError("Only Zstandard compression is supported")
 
         return total_size, source_type
 
@@ -317,8 +301,7 @@ def compress_stream(
                     with tarfile.open(fileobj=compressor, mode="w|") as tar:
                         tar.add(str(source_path), arcname=source_path.name)
         else:
-            with tarfile.open(output_path, "w:gz", compresslevel=compress_level) as tar:
-                tar.add(str(source_path), arcname=source_path.name)
+            raise CompressionError("Only Zstandard compression is supported")
 
         if progress_callback:
             progress_callback(total_size, total_size, "compressing")
@@ -356,36 +339,33 @@ def decompress_stream(
     output_dir: Path,
     target_name: str,
     source_type: str,
-    algorithm: str = "gzip",
+    algorithm: str = "zstd",
 ) -> Path:
     """Decompress an archive to target_name inside output_dir with strict path traversal protection."""
     output_dir.mkdir(parents=True, exist_ok=True)
     destination_path = output_dir / target_name
     algo = algorithm.lower()
+    if algo != "zstd":
+        raise CompressionError("Only Zstandard compression is supported")
+    if not HAVE_ZSTANDARD:
+        from b2chks.backends import require_zstandard
+        require_zstandard()
 
     if source_type == "file":
-        if algo == "zstd" and HAVE_ZSTANDARD:
-            dctx = zstd.ZstdDecompressor()
-            with open(archive_path, "rb") as f_in, open(destination_path, "wb") as f_out:
-                dctx.copy_stream(f_in, f_out)
-        else:
-            with gzip.open(archive_path, "rb") as gz_in, open(destination_path, "wb") as f_out:
-                shutil.copyfileobj(gz_in, f_out)
+        dctx = zstd.ZstdDecompressor()
+        with open(archive_path, "rb") as f_in, open(destination_path, "wb") as f_out:
+            dctx.copy_stream(f_in, f_out)
     elif source_type == "directory":
-        if algo == "zstd" and HAVE_ZSTANDARD:
-            temp_tar = output_dir / f".tmp_{target_name}.tar"
-            dctx = zstd.ZstdDecompressor()
-            try:
-                with open(archive_path, "rb") as f_in, open(temp_tar, "wb") as f_out:
-                    dctx.copy_stream(f_in, f_out)
-                with tarfile.open(temp_tar, "r:") as tar:
-                    _safe_extract_tar(tar, output_dir)
-            finally:
-                if temp_tar.exists():
-                    temp_tar.unlink()
-        else:
-            with tarfile.open(archive_path, "r:gz") as tar:
+        temp_tar = output_dir / f".tmp_{target_name}.tar"
+        dctx = zstd.ZstdDecompressor()
+        try:
+            with open(archive_path, "rb") as f_in, open(temp_tar, "wb") as f_out:
+                dctx.copy_stream(f_in, f_out)
+            with tarfile.open(temp_tar, "r:") as tar:
                 _safe_extract_tar(tar, output_dir)
+        finally:
+            if temp_tar.exists():
+                temp_tar.unlink()
     else:
         raise CompressionError(f"Unknown source type: {source_type}")
 
@@ -397,7 +377,7 @@ def decompress_reader(
     output_dir: Path,
     target_name: str,
     source_type: str,
-    algorithm: str = "gzip",
+    algorithm: str = "zstd",
     max_files: Optional[int] = None,
     max_file_size: Optional[int] = None,
 ) -> Path:
@@ -405,20 +385,17 @@ def decompress_reader(
     output_dir.mkdir(parents=True, exist_ok=True)
     destination_path = output_dir / target_name
     algo = algorithm.lower()
+    if algo != "zstd":
+        raise CompressionError("Only Zstandard compression is supported")
+    if not HAVE_ZSTANDARD:
+        from b2chks.backends import require_zstandard
+        require_zstandard()
     if source_type == "file":
-        if algo == "zstd" and HAVE_ZSTANDARD:
-            with zstd.ZstdDecompressor().stream_reader(reader) as decompressed, open(destination_path, "wb") as out:
-                shutil.copyfileobj(decompressed, out, STREAM_BUFFER_SIZE)
-        else:
-            with gzip.GzipFile(fileobj=reader, mode="rb") as decompressed, open(destination_path, "wb") as out:
-                shutil.copyfileobj(decompressed, out, STREAM_BUFFER_SIZE)
+        with zstd.ZstdDecompressor().stream_reader(reader) as decompressed, open(destination_path, "wb") as out:
+            shutil.copyfileobj(decompressed, out, STREAM_BUFFER_SIZE)
     elif source_type == "directory":
-        if algo == "zstd" and HAVE_ZSTANDARD:
-            with zstd.ZstdDecompressor().stream_reader(reader) as decompressed:
-                with tarfile.open(fileobj=decompressed, mode="r|") as tar:
-                    _safe_extract_tar_stream(tar, output_dir, max_files, max_file_size)
-        else:
-            with tarfile.open(fileobj=reader, mode="r|gz") as tar:
+        with zstd.ZstdDecompressor().stream_reader(reader) as decompressed:
+            with tarfile.open(fileobj=decompressed, mode="r|") as tar:
                 _safe_extract_tar_stream(tar, output_dir, max_files, max_file_size)
     else:
         raise CompressionError(f"Unknown source type: {source_type}")

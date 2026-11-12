@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List
 
 from b2chks.chunking import parse_size, ByteBudget
-from b2chks.compression import compress_stream, compress_to_chunks
+from b2chks.compression import compress_to_chunks
+from b2chks.archive import create_zip
 from b2chks.encryption import (
     NONCE_SIZE,
     TAG_SIZE,
@@ -75,7 +76,7 @@ def pack(
     private_key_path: Optional[str] = None,
     author: Optional[str] = None,
     generate_key: bool = False,
-    compression: str = "gzip",
+    compression: str = "zstd",
     kdf: str = "scrypt",
     workers: Optional[int] = None,
     memory_budget_bytes: Optional[int] = None,
@@ -92,6 +93,11 @@ def pack(
 
     out_dir = Path(output_dir).resolve() if output_dir else Path.cwd()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if not chunk_size_str and not nochunks:
+        if encrypt_key or private_key_path or generate_key or author:
+            raise ValueError("Encryption and signing require --chunk-size or --nochunks; plain ZIP archives do not contain a manifest.")
+        return create_zip(source_path, out_dir, progress_callback)
 
     priv_file = private_key_path
     if generate_key or (priv_file and not Path(priv_file).exists() and priv_file == "auto"):
@@ -127,12 +133,13 @@ def pack(
 
     from b2chks.backends import HAVE_ZSTANDARD
     actual_compression = compression.lower()
-    if actual_compression == "zstd" and not HAVE_ZSTANDARD:
-        actual_compression = "gzip"
+    if actual_compression != "zstd":
+        raise ValueError("Only Zstandard compression is supported for B2CHKS packages.")
+    if not HAVE_ZSTANDARD:
+        from b2chks.backends import require_zstandard
+        require_zstandard()
 
     chunks_meta = []
-    if not chunk_size_str and not nochunks:
-        raise ValueError("chunk_size is required unless nochunks=True")
     if chunk_size_str:
         chunk_size = parse_size(chunk_size_str)
     elif source_path.is_file():

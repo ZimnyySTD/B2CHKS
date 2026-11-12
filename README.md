@@ -14,7 +14,7 @@ Separating **packaging** from **hosting**, B2CHKS allows you to compress, option
 ## Clean Command Overview
 
 B2CHKS provides 5 clean, straightforward commands:
-- `b2chks pack`: Compress, optionally chunk (or `--nochunks`), encrypt, and sign.
+- `b2chks pack`: Create a standard ZIP, or compress/chunk (or `--nochunks`) with Zstandard, encryption, and signing.
 - `b2chks extract`: Verify, decrypt, and decompress package in one go.
 - `b2chks verify`: Verify package integrity and author signature.
 - `b2chks keygen`: Generate Ed25519 author signing keys.
@@ -30,13 +30,20 @@ python install.py
 ```
 *Note: If an installation already exists, `install.py` replaces and refreshes it cleanly.*
 
-### 2. Fast Packaging without Chunking (`--nochunks`)
+### 2. Standard ZIP archive
+With neither `--chunk-size` nor `--nochunks`, B2CHKS creates a normal ZIP archive
+with no manifest or chunk files:
+```bash
+b2chks pack ./my_project
+```
+
+### 3. B2CHKS packaging without chunking (`--nochunks`)
 To compress a file or directory into a single package without splitting into multiple chunks:
 ```bash
 b2chks pack ./my_project --nochunks
 ```
 
-### 3. Packaging with Chunking
+### 4. Packaging with Chunking
 ```bash
 # Split into 100MB chunks
 b2chks pack ./my_game_folder --chunk-size 100m
@@ -45,15 +52,16 @@ b2chks pack ./my_game_folder --chunk-size 100m
 b2chks pack ./my_game_folder --chunk-size 100m --encrypt-key "MySecretPassphrase123"
 ```
 
-### 4. Verify Chunks & Signature
+### 5. Verify Chunks & Signature
 ```bash
 b2chks verify manifest.json --public-key public.pem
 ```
 
-### 5. Extract in One Go
+### 6. Extract in One Go
 ```bash
-# Unencrypted package
+# Standard ZIP or B2CHKS package
 b2chks extract manifest.json --output-dir ./extracted
+b2chks extract my_project.zip --output-dir ./extracted
 
 # Encrypted package (interactive password prompt)
 b2chks extract manifest.json
@@ -75,11 +83,9 @@ B2CHKS provides a clean, decoupled SDK for integration into game launchers, back
 ```python
 from b2chks import B2CHKS
 
-# Fast packaging without chunks
+# Standard ZIP when no chunk options are supplied
 manifest = B2CHKS.pack(
     source="./project_files",
-    nochunks=True,
-    encrypt_key="SecretPassword",
 )
 
 # Extract

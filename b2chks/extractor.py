@@ -6,11 +6,13 @@ import os
 import sys
 import shutil
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, Tuple, List
 
 from b2chks.chunking import ByteBudget
 from b2chks.compression import decompress_stream, decompress_reader, PrefetchChunkReader
+from b2chks.archive import extract_zip
 from b2chks.encryption import (
     NONCE_SIZE,
     TAG_SIZE,
@@ -238,6 +240,20 @@ def extract(
     writing directly to decompressor without redundant disk passes.
     """
     mpath = resolve_manifest_path(manifest_path)
+    if manifest_path and Path(manifest_path).is_file() and Path(manifest_path).suffix.lower() == ".zip":
+        try:
+            result = extract_zip(
+                Path(manifest_path).resolve(),
+                Path(output_dir).resolve() if output_dir else Path.cwd(),
+                max_output_size=max_output_size,
+                max_files=max_files,
+                max_file_size=max_file_size,
+            )
+            print(f"[+] ZIP extraction complete -> {result}")
+            return True
+        except (OSError, CompressionError, zipfile.BadZipFile) as exc:
+            print(f"[-] ZIP extraction error: {exc}")
+            return False
     if not mpath.exists():
         print(f"[-] Error: Manifest file {mpath} does not exist.")
         return False
@@ -268,7 +284,7 @@ def extract(
     is_encrypted = package_info.get("encrypted", False)
     source_type = package_info.get("source_type", "file")
     target_name = package_info.get("name", "extracted_output")
-    compression_algo = package_info.get("compression", "gzip")
+    compression_algo = package_info.get("compression", "zstd")
     if Path(target_name).name != target_name or Path(target_name).is_absolute():
         print("[-] Unsafe output name in manifest.")
         return False

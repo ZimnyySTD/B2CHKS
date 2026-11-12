@@ -9,6 +9,7 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "cryptography>=3.4",
+        "zstandard>=0.18",
     ],
     extras_require={
         "fast": ["zstandard>=0.18"],

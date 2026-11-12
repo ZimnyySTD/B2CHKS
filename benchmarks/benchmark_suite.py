@@ -12,9 +12,9 @@ def run_suite():
     print("=" * 70)
 
     scenarios = [
-        ("Small File (64KB)", 64 * 1024, "16k", "gzip"),
-        ("Medium File (5MB)", 5 * 1024 * 1024, "512k", "gzip"),
-        ("Large File (20MB)", 20 * 1024 * 1024, "1m", "gzip"),
+        ("Small File (64KB)", 64 * 1024, "16k", "zstd"),
+        ("Medium File (5MB)", 5 * 1024 * 1024, "512k", "zstd"),
+        ("Large File (20MB)", 20 * 1024 * 1024, "1m", "zstd"),
         ("Zstandard (5MB)", 5 * 1024 * 1024, "512k", "zstd"),
     ]
 

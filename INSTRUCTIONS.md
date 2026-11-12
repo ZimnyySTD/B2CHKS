@@ -1,6 +1,6 @@
 # B2CHKS Protocol Instructions & Developer Guide
 
-**B2CHKS** is a cross-platform, high-performance file packaging, chunking, compression, and secure distribution protocol, CLI tool, and embeddable Python SDK. It decouples packaging from hosting, allowing creators to compress, split (or pack without chunks via `--nochunks`), optionally encrypt (AES-256-GCM with anti-brute-force scrypt), and cryptographically sign (Ed25519) any file or directory.
+**B2CHKS** is a cross-platform, high-performance file packaging, chunking, compression, and secure distribution protocol, CLI tool, and embeddable Python SDK. It creates ordinary ZIP archives by default, or Zstandard-compressed B2CHKS packages when chunking or `--nochunks` is requested.
 
 ---
 
@@ -59,29 +59,31 @@ If `--out-dir` is omitted, keys are written to the current working directory (`.
 
 ### Step B: Packaging Files or Directories (`pack`)
 
-#### 1. Fast Packaging without Chunking (`--nochunks`):
+#### 1. Standard ZIP archive:
+```bash
+b2chks pack ./my_game_folder
+```
+
+#### 2. B2CHKS packaging without chunking (`--nochunks`):
 To quickly compress a file or folder into a single package file without splitting:
 ```bash
 b2chks pack ./my_game_folder --nochunks
 ```
 
-#### 2. Packaging with Chunking (`--chunk-size`):
+#### 3. Packaging with Chunking (`--chunk-size`):
 To split into size-bounded chunks (e.g. `500k`, `100m`, `1g`, `2gb`):
 ```bash
 b2chks pack ./my_game_folder --chunk-size 100m
 ```
 
-#### 3. Encrypted Packaging (AES-256-GCM + Anti-Brute-Force scrypt):
+#### 4. Encrypted Packaging (AES-256-GCM + Anti-Brute-Force scrypt):
 ```bash
 b2chks pack ./my_game_folder --nochunks --encrypt-key "MySecretPassphrase123"
 # or with chunks:
 b2chks pack ./my_game_folder --chunk-size 100m --encrypt-key "MySecretPassphrase123"
 ```
 
-#### 4. High-Speed Zstandard Compression:
-```bash
-b2chks pack ./my_game_folder --nochunks --compression zstd
-```
+Zstandard is the only compression format used by B2CHKS packages.
 
 ---
 
