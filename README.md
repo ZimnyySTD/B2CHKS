@@ -104,6 +104,33 @@ Run benchmarks:
 python benchmarks/benchmark_suite.py
 ```
 
+## Performance and security options
+
+B2CHKS uses a streaming pack/extract pipeline and bounded chunk reads to avoid
+the old full temporary-archive pass. The CLI also provides low-overhead
+progress output, automatically disabled when output is redirected:
+
+```bash
+b2chks extract manifest.json --trusted-public-key public.pem
+b2chks extract manifest.json --no-progress
+b2chks extract manifest.json --json
+```
+
+Optional extraction limits are available for untrusted packages without
+changing the default behavior:
+
+```bash
+b2chks extract manifest.json \
+  --max-output-size 100000000000 \
+  --max-files 100000 \
+  --max-file-size 10000000000 \
+  --max-compression-ratio 500
+```
+
+Use `--trusted-public-key` when the manifest signature must match a key
+obtained from a trusted source; the key embedded in a manifest is otherwise
+only an identity claim.
+
 ---
 
 ## License & Protocol

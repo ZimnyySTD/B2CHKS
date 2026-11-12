@@ -143,3 +143,17 @@ success = B2CHKS.extract(
     decrypt_key="AppSecretKey",
 )
 ```
+
+### Progress and safe extraction
+
+The CLI renders phase progress only on interactive terminals and throttles
+updates to avoid unnecessary CPU usage. Use `--quiet`, `--no-progress`, or
+`--json` for automation. Extraction can optionally enforce limits and verify
+against an external trusted signing key:
+
+```bash
+b2chks extract manifest.json \
+  --trusted-public-key ./keys/public.pem \
+  --max-output-size 100000000000 \
+  --max-files 100000
+```
