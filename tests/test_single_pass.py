@@ -10,9 +10,9 @@ def test_actual_compression_recorded(tmp_path):
     src.write_text("Testing compression recording")
     dist = tmp_path / "dist"
 
-    manifest_path = B2CHKS.pack(source=src, chunk_size="10k", output_dir=dist, compression="gzip")
+    manifest_path = B2CHKS.pack(source=src, chunk_size="10k", output_dir=dist, compression="zstd")
     manifest = load_manifest(manifest_path)
-    assert manifest["package_info"]["compression"] == "gzip"
+    assert manifest["package_info"]["compression"] == "zstd"
 
 def test_single_pass_corrupt_chunk_detected(tmp_path):
     src = tmp_path / "file.bin"

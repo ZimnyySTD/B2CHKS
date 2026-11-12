@@ -32,24 +32,24 @@ def main(custom_argv: Optional[List[str]] = None):
     parser_keygen.add_argument("--out-dir", "-o", type=str, default=".", help="Output directory for keys")
 
     # 2. pack
-    parser_pack = subparsers.add_parser("pack", help="Compress, pack, optionally chunk, encrypt and sign")
+    parser_pack = subparsers.add_parser("pack", help="Create a standard ZIP or a chunked B2CHKS package")
     parser_pack.add_argument("source", type=str, help="Path to file or directory to pack")
     parser_pack.add_argument(
         "--chunk-size", "-c",
         dest="chunk_size",
         type=str,
         default=None,
-        help="Size of each chunk (e.g. 100m, 500m, 1g, 500k). Required unless --nochunks is used.",
+        help="Size of each chunk. If omitted without --nochunks, create a standard ZIP archive.",
     )
     parser_pack.add_argument(
         "--nochunks", "--no-chunks",
         dest="nochunks",
         action="store_true",
-        help="Compress directly into a single package file without chunking",
+        help="Create a single B2CHKS chunk with a manifest",
     )
     parser_pack.add_argument("--encrypt-key", "-e", dest="encrypt_key", type=str, default=None, help="Passphrase to encrypt with AES-256-GCM")
     parser_pack.add_argument("--kdf", type=str, choices=["scrypt", "pbkdf2"], default="scrypt", help="Key derivation function (default: scrypt)")
-    parser_pack.add_argument("--compression", type=str, choices=["gzip", "zstd"], default="gzip", help="Compression algorithm (default: gzip, optional: zstd)")
+    parser_pack.add_argument("--compression", type=str, choices=["zstd"], default="zstd", help="B2CHKS compression (Zstandard)")
     parser_pack.add_argument("--private-key", "-k", dest="private_key", type=str, default=None, help="Path to Ed25519 private.pem to sign manifest")
     parser_pack.add_argument("--author", "-a", type=str, default=None, help="Author/Developer ID for manifest")
     parser_pack.add_argument("--output-dir", "-o", dest="output_dir", type=str, default=None, help="Output directory for package and manifest")
@@ -105,10 +105,6 @@ def main(custom_argv: Optional[List[str]] = None):
             print(f"    Public key:  {pub}")
 
         elif args.command == "pack":
-            if not args.nochunks and not args.chunk_size:
-                print("[-] Error: --chunk-size (-c) is required unless --nochunks is specified.", file=sys.stderr)
-                sys.exit(1)
-
             progress = ProgressRenderer(
                 enabled=sys.stderr.isatty() and not args.no_progress,
                 json_mode=args.json,

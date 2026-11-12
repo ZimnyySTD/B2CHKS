@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 
@@ -26,23 +27,68 @@ def get_install_locations():
         locations.append(Path(user_profile) / ".local" / "bin")
         locations.append(Path(user_profile) / "bin")
     else:
+        locations.append(Path(sys.prefix) / "bin")
+        locations.append(Path(sys.prefix) / "Scripts")
         locations.append(Path.home() / ".local" / "bin")
         locations.append(Path("/usr/local/bin"))
         locations.append(Path.home() / "bin")
     return locations
 
 
+def _pip_package_installed() -> bool:
+    """Return whether this interpreter still has the package registered."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "show", "b2chks"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return False
+        location_marker = "Location:"
+        if location_marker in result.stdout:
+            location = result.stdout.split(location_marker, 1)[1].splitlines()[0].strip()
+            try:
+                Path(location).resolve().relative_to(Path(sys.prefix).resolve())
+            except ValueError:
+                return False
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _remove_editable_artifacts() -> int:
+    """Remove stale editable-install metadata left outside pip's environment."""
+    purelib = Path(sysconfig.get_paths()["purelib"]).resolve()
+    if not purelib.is_dir():
+        return 0
+    removed = 0
+    for entry in purelib.iterdir():
+        if entry.name == "b2chks.egg-link" or (
+            entry.name.startswith("__editable__") and "b2chks" in entry.name
+        ) or (entry.name.startswith("b2chks-") and entry.name.endswith(".dist-info")):
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def is_installed() -> bool:
     """Check if B2CHKS is currently installed anywhere on the system."""
     try:
-        res = subprocess.run([sys.executable, "-m", "pip", "show", "b2chks"], capture_output=True, text=True)
-        if res.returncode == 0:
+        if _pip_package_installed():
             return True
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
 
     cmd_names = ["b2chks", "core", "chunkcore", "b3chks"]
-    exts = [".cmd", ".bat", ".ps1", ""] if platform.system() == "Windows" else [""]
+    exts = [".cmd", ".bat", ".ps1", ""]
     for loc in get_install_locations():
         if loc.exists():
             for name in cmd_names:
@@ -66,15 +112,27 @@ def uninstall():
     removed_items = 0
 
     try:
-        res = subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "b2chks"], capture_output=True, text=True)
-        if res.returncode == 0:
-            print("[+] Uninstalled pip package 'b2chks'.")
+        for _ in range(3):
+            res = subprocess.run(
+                [sys.executable, "-m", "pip", "uninstall", "-y", "b2chks"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if res.returncode != 0:
+                break
             removed_items += 1
-    except Exception as e:
+            if not _pip_package_installed():
+                print("[+] Uninstalled pip package 'b2chks'.")
+                break
+        else:
+            print("[!] Warning: pip still reports package 'b2chks' after removal attempts.")
+        removed_items += _remove_editable_artifacts()
+    except (OSError, subprocess.SubprocessError) as e:
         print(f"[*] Notice: pip uninstall: {e}")
 
     cmd_names = ["b2chks", "core", "chunkcore", "b3chks"]
-    exts = [".cmd", ".bat", ".ps1", ""] if platform.system() == "Windows" else [""]
+    exts = [".cmd", ".bat", ".ps1", ""]
     for loc in get_install_locations():
         if loc.exists():
             for name in cmd_names:
@@ -132,17 +190,27 @@ def install():
     py_exec = sys.executable
 
     # 1. Install required native dependencies
-    print("[*] Installing required native performance backends (cryptography)...")
-    res_crypto = subprocess.run([py_exec, "-m", "pip", "install", "cryptography>=3.4"], check=False, capture_output=True, text=True)
+    print("[*] Installing required native performance backends (cryptography, zstandard)...")
+    res_crypto = subprocess.run(
+        [py_exec, "-m", "pip", "install", "cryptography>=3.4", "zstandard>=0.18"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
     if res_crypto.returncode == 0:
         print("[+] Native cryptography installed/verified.")
     else:
         print("[!] Warning: Could not install cryptography via pip. Native crypto is required for B2CHKS.")
 
-    # 2. Install editable pip package with entry points
+    # 2. Install a regular wheel so pip can reliably remove it later.
     try:
         print("[*] Installing package entrypoints via pip...")
-        res = subprocess.run([py_exec, "-m", "pip", "install", "-e", str(repo_root)], capture_output=True, text=True)
+        res = subprocess.run(
+            [py_exec, "-m", "pip", "install", "--force-reinstall", "--no-deps", str(repo_root)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if res.returncode == 0:
             print("[+] Pip entrypoints installed successfully.")
     except Exception as e:

@@ -13,7 +13,7 @@ def test_parse_size():
     with pytest.raises(ValueError):
         parse_size("invalid")
 
-def test_pack_single_file_gzip(tmp_path):
+def test_pack_single_file_zstd(tmp_path):
     src = tmp_path / "data.bin"
     src.write_bytes(os.urandom(64 * 1024))
     dist = tmp_path / "dist"
@@ -22,7 +22,7 @@ def test_pack_single_file_gzip(tmp_path):
         source=src,
         chunk_size="16k",
         output_dir=dist,
-        compression="gzip",
+        compression="zstd",
     )
     assert manifest_path.exists()
     assert B2CHKS.verify(manifest=manifest_path)
